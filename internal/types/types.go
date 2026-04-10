@@ -116,6 +116,7 @@ type AgentInfo struct {
 type StepTrace struct {
 	TaskID     string     `json:"task_id"`
 	Agent      string     `json:"agent"`
+	WorkerID   string     `json:"worker_id"`
 	StartTime  time.Time  `json:"start_time"`
 	EndTime    time.Time  `json:"end_time"`
 	Success    bool       `json:"success"`

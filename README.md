@@ -1,90 +1,90 @@
-# AI Orchestrator V2
+# AI Orchestrator V3
 
-A production-grade, adaptive multi-agent AI orchestration platform built in Go. V2 evolves from linear execution to a **feedback-driven control loop** with DAG-based scheduling, intelligent evaluation, and dynamic replanning.
+A production-grade, **distributed** multi-agent AI orchestration platform built in Go. V3 evolves from single-node execution to a horizontally scalable distributed platform with worker nodes, task queues, RPC communication, and fault tolerance.
 
-## Architecture V2
+## Architecture Evolution
 
-```
-User Goal
-    │
-    ▼
-┌─────────────────┐
-│   Orchestrator   │  ← Entry point, wires all components
-└────────┬────────┘
-         │ delegates to
-    ┌────┴────┐
-    │Controller│  ← V2: Plan → Execute → Evaluate → Replan
-    └────┬─────┘
-         │
-    ┌────┼────────────┐
-    ▼    ▼            ▼
-┌──────┐ ┌────────┐ ┌──────────┐
-│Planner│ │Engine  │ │Evaluator │
-└───┬──┘ └───┬────┘ └──────────┘
-    │        │
-    │   ┌────┴─────────┐
-    │   ▼              ▼
-    │ ┌──────┐  ┌────────────┐
-    │ │Agents│→│ ToolGateway  │→ MCP Tools (mock)
-    │ └──────┘  └────────────┘
-    │             │
-    ▼             ▼
-┌───────┐  ┌──────────────┐
-│EventBus│  │ContextManager│
-└───────┘  └──────────────┘
-```
+| Version | Architecture |
+|---------|-------------|
+| V1 | Linear task execution with agents + tool gateway |
+| V2 | Adaptive control loop (Plan→Execute→Evaluate→Replan) + DAG scheduling |
+| **V3** | **Distributed execution with worker nodes + task queue + RPC** |
 
-## V2 Control Loop
+## V3 Distributed Architecture
 
 ```
-Plan → Execute Task → Evaluate Result
-→ if success → next task (DAG-aware)
-→ if failed → retry (exponential backoff)
-→ if retries exhausted → Replan (dynamic plan adjustment)
-→ repeat until all tasks complete or max replans exceeded
+                ┌──────────────────┐
+                │   Orchestrator    │
+                │  (Controller +    │
+                │   Distributed     │
+                │    Executor)      │
+                └────────┬─────────┘
+                         │
+                   Task Queue
+                (MemoryQueue)
+                         │
+              Worker Registry
+              (Round-Robin LB)
+                         │
+          ┌──────────────┼──────────────┐
+          │              │              │
+   ┌──────▼──────┐ ┌────▼─────┐ ┌──────▼──────┐
+   │  Worker-1   │ │ Worker-2 │ │  Worker-N   │
+   │  (Agents)   │ │ (Agents) │ │  (Agents)   │
+   │  (Tools)    │ │ (Tools)  │ │  (Tools)    │
+   └─────────────┘ └──────────┘ └─────────────┘
 ```
 
 ## Project Structure
 
 ```
-cmd/orchestrator/           # CLI entry point + tests
-/internal/
-  orchestrator/             # Core orchestrator (V2: delegates to Controller)
-  controller/               # V2: Adaptive control loop (NEW)
-  evaluator/                # V2: Heuristic-based task evaluation (NEW)
-  planner/                  # Dynamic planning with DAG + Replan support
-  execution/                # DAG-aware execution engine
-  agents/                   # DevAgent, QAAgent, OpsAgent (NEW)
-  tools/                    # Tool Gateway (ACL enforcement)
-  mcp/                      # MCP tool registry (mock)
-  context/                  # Short-term context manager
-  events/                   # Pub/sub event bus
-  types/                    # Core typed models (TaskNode, Evaluation, ExecutionTrace)
+cmd/
+  orchestrator/          # CLI entry point (local or distributed mode)
+  worker/                # Standalone worker process
+internal/
+  orchestrator/          # Core orchestrator (V3: supports distributed mode)
+  controller/            # Adaptive control loop (V3: TaskExecutor interface)
+  executor/              # V3: Distributed task executor (NEW)
+  queue/                 # V3: Thread-safe task queue (NEW)
+  registry/              # V3: Worker registry + load balancing (NEW)
+  rpc/                   # V3: RPC service layer (NEW)
+  worker/                # V3: Worker node implementation (NEW)
+  state/                 # V3: Task state tracking (NEW)
+  evaluator/             # V2: Heuristic-based task evaluation
+  planner/               # V2: Dynamic planning with DAG + Replan
+  execution/             # V2: DAG-aware execution engine
+  agents/                # DevAgent, QAAgent, OpsAgent
+  tools/                 # Tool Gateway (ACL enforcement)
+  mcp/                   # MCP tool registry (mock)
+  context/               # Short-term context manager
+  events/                # Pub/sub event bus
+  types/                 # Core typed models
+proto/
+  worker.proto           # gRPC service definition
 ```
 
-## V2 New Components
+## V3 New Components
 
-| Component | Purpose |
-|-----------|---------|
-| **Controller** | Runs the adaptive `Plan→Execute→Evaluate→Replan` loop |
-| **Evaluator** | Assesses task results with confidence scores and retryability |
-| **DAG Execution** | Tasks run only when dependencies are satisfied; parallel for independent nodes |
-| **Replanning** | Planner dynamically adjusts plans on failure (removes failed tasks, inserts recovery) |
-| **OpsAgent** | Handles deployment and infrastructure operations |
-| **ExecutionTrace** | Collects per-step observability data (timing, evaluation, retries) |
+| Component | Package | Purpose |
+|-----------|---------|---------|
+| **DistributedExecutor** | `internal/executor` | Enqueues tasks, selects workers, dispatches via RPC, tracks state |
+| **MemoryQueue** | `internal/queue` | Bounded, blocking, thread-safe task queue (channel-based) |
+| **MemoryRegistry** | `internal/registry` | Worker registration + round-robin load balancing |
+| **RPC Client/Server** | `internal/rpc` | Task execution protocol (JSON-serialized, swappable for real gRPC) |
+| **Worker** | `internal/worker` | Distributed execution node with registered agents |
+| **TaskTracker** | `internal/state` | In-memory task lifecycle tracking |
 
 ## Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| Controller owns Planner, Evaluator, Engine | Composition over inheritance; clear ownership |
-| DAG via `TaskNode.DependsOn` | Enables parallel execution of independent tasks |
-| Cycle detection via DFS | Prevents infinite loops from malformed plans |
-| Heuristic Evaluator (no LLM) | Deterministic, fast, swappable for ML-based later |
-| `Planner.Replan` removes failed tasks + inserts recovery | Plan evolves based on feedback, not static |
-| Agents never call tools directly | All tool access flows through `ToolGateway` with ACL |
-| Interfaces everywhere | Swappable LLM backends, storage, evaluators |
-| No global state | Everything injected via constructor — testable |
+| `TaskExecutor` interface in Controller | Allows swapping local ↔ distributed without changing control loop |
+| Bounded queue with blocking dequeue | Natural backpressure; no busy-waiting |
+| Round-robin worker selection | Simple, fair distribution; swappable for least-loaded |
+| RPC via JSON serialization | Transport-agnostic; real gRPC can be dropped in later |
+| Direct call transport for demo | Self-contained demo; real network layer is a drop-in replacement |
+| Worker stateless, orchestrator stateful | Workers can be added/removed without state migration |
+| Task state tracking separate from execution | Enables observability without coupling |
 
 ## Features
 
@@ -96,29 +96,57 @@ cmd/orchestrator/           # CLI entry point + tests
 - Context management with summarization
 - Structured logging via `log/slog`
 
-### V2 (New)
-- **Adaptive Control Loop**: Plan → Execute → Evaluate → Replan
-- **DAG-Based Execution**: Dependency-aware scheduling with parallel support
-- **Intelligent Evaluation**: Confidence scores, retryability detection
-- **Dynamic Replanning**: Plan adjusts on failure with recovery tasks
-- **Execution Tracing**: Full observability with per-step evaluation data
-- **Circular Dependency Detection**: DFS-based cycle detection
-- **OpsAgent**: Deployment and infrastructure operations
+### V2 (Retained)
+- Adaptive Control Loop: Plan → Execute → Evaluate → Replan
+- DAG-Based Execution: Dependency-aware scheduling
+- Intelligent Evaluation: Confidence scores, retryability detection
+- Dynamic Replanning: Plan adjusts on failure
+- Execution Tracing: Full observability
+- Circular Dependency Detection
+
+### V3 (New)
+- **Distributed Execution**: Tasks dispatched to remote worker nodes
+- **Task Queue**: Bounded, blocking, thread-safe channel-based queue
+- **Worker Registry**: Registration + round-robin load balancing
+- **RPC Service Layer**: Task execution protocol (JSON-serialized)
+- **Worker Nodes**: Independent processes with registered agents
+- **Task State Tracking**: Lifecycle tracking (pending → running → done/failed)
+- **Fault Tolerance**: Retry on worker failure, timeout detection, requeue
+- **Distributed Observability**: Worker ID in traces, per-task latency, state counts
 
 ## Running the Demo
+
+### Local Mode (default)
+All agents run in-process — no workers needed:
 
 ```bash
 go run ./cmd/orchestrator/
 ```
 
-Input: `"Fix failing test and deploy service"`
+### Distributed Mode (in-process demo)
+Workers are simulated in-process for the demo:
 
-DAG structure:
-```
-[DevAgent: fix_test] → [QAAgent: run_tests] → [OpsAgent: deploy]
+```bash
+go run ./cmd/orchestrator/ --distributed
 ```
 
-### Running Tests
+Output shows:
+- Tasks dispatched to `worker-1` and `worker-2` via round-robin
+- RPC call logs with task serialization
+- Worker IDs in execution trace
+- Distributed state summary (task states, registered workers)
+
+### Standalone Worker Process
+
+```bash
+# Terminal 1: Start worker
+go run ./cmd/worker --id=worker-1 --addr=localhost:50051
+
+# Terminal 2: Start orchestrator (would connect via gRPC in production)
+go run ./cmd/orchestrator/ --distributed
+```
+
+## Running Tests
 
 ```bash
 go test ./... -v
@@ -131,23 +159,22 @@ Tests cover:
 - Circular dependency detection
 - Full control loop execution
 
-## Production Improvements
+## Production Deployment
 
-1. **Replace mock LLM** with real API calls (OpenAI, Claude, local models)
-2. **ML-based Evaluator** using historical execution data
-3. **Persistent storage** for context and execution history (PostgreSQL, Redis)
-4. **Distributed execution** via gRPC between orchestrator instances
-5. **Real MCP networking** with proper protocol implementation
-6. **Metrics export** (Prometheus) for monitoring and alerting
-7. **Human-in-the-loop** approval gates for critical operations
-8. **Secret management** integration (Vault, AWS Secrets Manager)
-9. **Rate limiting** and circuit breakers for external tool calls
-10. **Advanced DAG features**: conditional branches, sub-graphs, dynamic node injection
+To deploy as a real distributed system:
+
+1. **Replace demo RPC transport** with `google.golang.org/grpc`
+2. **Compile protobuf**: `protoc --go_out=. --go-grpc_out=. proto/worker.proto`
+3. **Deploy workers** as separate processes/containers on different nodes
+4. **Use shared message queue** (Redis, RabbitMQ, Kafka) instead of `MemoryQueue`
+5. **Add service discovery** (Consul, etcd) instead of in-memory registry
+6. **Add health checks** via `rpc.HealthCheck` endpoint
+7. **Monitor** with Prometheus metrics + Grafana dashboards
 
 ## Constraints
 
-- No frameworks — stdlib only (`log/slog`, `context`, `sync`, `time`)
+- No frameworks — stdlib only (gRPC import ready but not required for demo)
 - No real LLM calls (mock implementation)
 - No real MCP networking (mock tools)
 - Clean architecture with decoupled modules
-- V2 extends V1 — no components removed or rewritten from scratch
+- V3 extends V2 — no components removed or rewritten from scratch

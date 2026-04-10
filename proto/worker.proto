@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package worker;
+
+option go_package = "ai-orchestrator/proto/pb";
+
+// WorkerService provides remote task execution for the AI Orchestrator.
+service WorkerService {
+  // ExecuteTask runs a task on the worker node.
+  rpc ExecuteTask(TaskRequest) returns (TaskResponse);
+  
+  // HealthCheck verifies the worker is alive and ready.
+  rpc HealthCheck(HealthRequest) returns (HealthResponse);
+}
+
+message TaskRequest {
+  string task_id = 1;
+  string agent = 2;
+  bytes payload = 3; // JSON-serialized Task
+}
+
+message TaskResponse {
+  bool success = 1;
+  bytes result = 2; // JSON-serialized Result
+  string error = 3;
+  string worker_id = 4;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string worker_id = 1;
+  string status = 2;
+  repeated string agents = 3;
+}

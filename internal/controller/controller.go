@@ -1,18 +1,19 @@
 // Package controller implements the adaptive orchestration control loop.
 //
-// The Controller is the V2 brain of the system, implementing:
+// V3 update: Controller now supports both local and distributed execution
+// via the TaskExecutor interface. The control loop logic remains unchanged.
+//
+// The Controller is the brain of the system, implementing:
 //
 //	Plan → Execute Task → Evaluate Result
 //	→ if success → next task
 //	→ if failed → retry OR replan
 //
-// This feedback loop transforms the orchestrator from a linear executor
-// into an adaptive system that can respond to failures intelligently.
-//
 // Design decisions:
 // - Controller owns Planner, Evaluator, and Engine (composition over inheritance)
 // - The control loop is iterative, not recursive, to avoid stack overflow
 // - ExecutionTrace collects observability data for the entire run
+// - TaskExecutor interface allows swapping between local and distributed execution
 package controller
 
 import (
@@ -27,24 +28,30 @@ import (
 	"ai-orchestrator/internal/types"
 )
 
-// Planner interface abstracts the planner.Planner for dependency injection.
+// Planner abstracts the planner for dependency injection.
 type Planner interface {
 	GeneratePlan(goal string) (types.Plan, error)
 	Replan(currentPlan types.Plan, failedTask types.Task, eval types.Evaluation) types.Plan
+}
+
+// TaskExecutor abstracts task execution for local or distributed modes.
+type TaskExecutor interface {
+	ExecuteTask(ctx context.Context, task types.Task) (types.Result, error)
 }
 
 // Controller orchestrates the adaptive Plan→Execute→Evaluate→Replan loop.
 type Controller struct {
 	planner   Planner
 	evaluator evaluator.Evaluator
-	engine    *execution.Engine
+	engine    *execution.Engine    // local engine (V2)
+	executor  TaskExecutor         // abstracted executor (V3)
 	logger    *slog.Logger
 	eventBus  *events.EventBus
 	config    types.ExecutionConfig
 	trace     types.ExecutionTrace
 }
 
-// NewController creates a fully configured Controller.
+// NewController creates a fully configured Controller (V2 compatible).
 func NewController(
 	planner Planner,
 	eval evaluator.Evaluator,
@@ -57,11 +64,18 @@ func NewController(
 		planner:   planner,
 		evaluator: eval,
 		engine:    engine,
+		executor:  engine, // default to local engine
 		logger:    logger,
 		eventBus:  eventBus,
 		config:    config,
 		trace:     types.ExecutionTrace{},
 	}
+}
+
+// SetExecutor overrides the task executor for distributed execution (V3).
+func (c *Controller) SetExecutor(executor TaskExecutor) {
+	c.executor = executor
+	c.logger.Info("Task executor updated", "type", fmt.Sprintf("%T", executor))
 }
 
 // Run executes the full adaptive control loop for a user goal.
@@ -125,10 +139,6 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 
 	// Track which nodes are done
 	completed := make(map[string]bool)
-	nodeMap := make(map[string]types.TaskNode)
-	for _, node := range plan.Nodes {
-		nodeMap[node.Task.ID] = node
-	}
 
 	// Main loop
 	for len(completed) < len(plan.Nodes) {
@@ -158,9 +168,18 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 			stepStart := time.Now()
 			result, eval, stepErr := c.executeAndEvaluate(ctx, node.Task)
 
+			// Extract worker ID from result metadata (distributed mode)
+			workerID := ""
+			if result.Metadata != nil {
+				if wid, ok := result.Metadata["worker_id"].(string); ok {
+					workerID = wid
+				}
+			}
+
 			stepTrace := types.StepTrace{
 				TaskID:     node.Task.ID,
 				Agent:      node.Task.AssignedAgent,
+				WorkerID:   workerID,
 				StartTime:  stepStart,
 				EndTime:    time.Now(),
 				Success:    result.Success,
@@ -232,7 +251,7 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 
 // executeAndEvaluate runs a task and evaluates the result.
 func (c *Controller) executeAndEvaluate(ctx context.Context, task types.Task) (types.Result, types.Evaluation, error) {
-	result, err := c.engine.ExecuteTask(ctx, task)
+	result, err := c.executor.ExecuteTask(ctx, task)
 	eval := c.evaluator.Evaluate(task, result)
 
 	c.logger.Info("Task evaluated",
