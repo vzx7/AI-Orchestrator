@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // BaseAgent provides common functionality for all agent implementations.

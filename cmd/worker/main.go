@@ -22,10 +22,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"ai-orchestrator/internal/agents"
-	"ai-orchestrator/internal/mcp"
-	toolsgateway "ai-orchestrator/internal/tools"
-	"ai-orchestrator/internal/worker"
+	"ai_orchestrator/internal/agents"
+	"ai_orchestrator/internal/mcp"
+	toolsgateway "ai_orchestrator/internal/tools"
+	"ai_orchestrator/internal/worker"
 )
 
 func main() {

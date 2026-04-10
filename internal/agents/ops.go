@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // OpsAgent handles operations tasks like deployment and infrastructure.

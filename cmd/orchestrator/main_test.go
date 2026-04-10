@@ -6,16 +6,16 @@ import (
 	"os"
 	"testing"
 
-	"ai-orchestrator/internal/agents"
-	contextmanager "ai-orchestrator/internal/context"
-	"ai-orchestrator/internal/controller"
-	"ai-orchestrator/internal/events"
-	"ai-orchestrator/internal/evaluator"
-	"ai-orchestrator/internal/execution"
-	"ai-orchestrator/internal/mcp"
-	"ai-orchestrator/internal/planner"
-	toolsgateway "ai-orchestrator/internal/tools"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/agents"
+	contextmanager "ai_orchestrator/internal/context"
+	"ai_orchestrator/internal/controller"
+	"ai_orchestrator/internal/evaluator"
+	"ai_orchestrator/internal/events"
+	"ai_orchestrator/internal/execution"
+	"ai_orchestrator/internal/mcp"
+	"ai_orchestrator/internal/planner"
+	toolsgateway "ai_orchestrator/internal/tools"
+	"ai_orchestrator/internal/types"
 )
 
 // TestDAGExecution verifies that tasks execute in correct dependency order.
@@ -67,24 +67,24 @@ func TestEvaluator(t *testing.T) {
 		wantConfidence float64
 	}{
 		{
-			name: "successful task",
-			result: types.Result{Success: true},
+			name:           "successful task",
+			result:         types.Result{Success: true},
 			wantSuccess:    true,
 			wantRetryable:  false,
 			wantConfidence: 0.95,
 		},
 		{
-			name: "timeout is retryable",
-			task: types.Task{RetryCount: 0, MaxRetries: 3},
-			result: types.Result{Success: false, Error: "deadline exceeded"},
+			name:           "timeout is retryable",
+			task:           types.Task{RetryCount: 0, MaxRetries: 3},
+			result:         types.Result{Success: false, Error: "deadline exceeded"},
 			wantSuccess:    false,
 			wantRetryable:  true,
 			wantConfidence: 0.5,
 		},
 		{
-			name: "exhausted retries",
-			task: types.Task{RetryCount: 3, MaxRetries: 3},
-			result: types.Result{Success: false, Error: "something failed"},
+			name:           "exhausted retries",
+			task:           types.Task{RetryCount: 3, MaxRetries: 3},
+			result:         types.Result{Success: false, Error: "something failed"},
 			wantSuccess:    false,
 			wantRetryable:  false, // retries exhausted
 			wantConfidence: 0.1,
@@ -169,7 +169,7 @@ func TestCircularDependencyDetection(t *testing.T) {
 
 	// Create a plan with circular dependencies
 	plan := types.Plan{
-		ID:   "test-circular",
+		ID: "test-circular",
 		Nodes: []types.TaskNode{
 			{Task: types.Task{ID: "a", AssignedAgent: "dev"}, DependsOn: []string{"c"}},
 			{Task: types.Task{ID: "b", AssignedAgent: "dev"}, DependsOn: []string{"a"}},

@@ -14,8 +14,8 @@ import (
 	"log/slog"
 	"time"
 
-	"ai-orchestrator/internal/events"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/events"
+	"ai_orchestrator/internal/types"
 )
 
 // Planner generates and adjusts structured execution plans.
@@ -58,9 +58,9 @@ func (p *Planner) GeneratePlan(goal string) (types.Plan, error) {
 		Type:   events.EventPlanCreated,
 		Source: "planner",
 		Payload: map[string]any{
-			"plan_id":   plan.ID,
+			"plan_id":    plan.ID,
 			"node_count": len(plan.Nodes),
-			"goal":      goal,
+			"goal":       goal,
 		},
 	})
 

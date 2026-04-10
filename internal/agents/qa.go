@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // QAAgent is responsible for quality assurance tasks like running tests and validation.

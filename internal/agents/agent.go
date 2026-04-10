@@ -6,7 +6,7 @@
 package agents
 
 import (
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // Agent defines the contract for all specialized agents.

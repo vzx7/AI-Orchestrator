@@ -12,7 +12,7 @@ package evaluator
 import (
 	"strings"
 
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // Evaluator assesses task execution results and produces evaluations.

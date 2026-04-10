@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // TaskRequest represents a task execution request sent to a worker.

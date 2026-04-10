@@ -14,20 +14,20 @@ import (
 	"runtime/debug"
 	"time"
 
-	"ai-orchestrator/internal/agents"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/agents"
+	"ai_orchestrator/internal/types"
 )
 
 // Worker represents a distributed execution node with hardening.
 type Worker struct {
-	ID              string
-	agents          map[string]agents.Agent
-	toolGW          agents.ToolGateway
-	logger          *slog.Logger
-	taskTimeout     time.Duration
-	running         bool
-	shutdown        context.CancelFunc
-	shutdownCtx     context.Context
+	ID          string
+	agents      map[string]agents.Agent
+	toolGW      agents.ToolGateway
+	logger      *slog.Logger
+	taskTimeout time.Duration
+	running     bool
+	shutdown    context.CancelFunc
+	shutdownCtx context.Context
 }
 
 // WorkerConfig holds worker initialization options.

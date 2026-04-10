@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"ai-orchestrator/internal/queue"
+	"ai_orchestrator/internal/queue"
 )
 
 // DeadLetterEntry wraps a failed task with failure metadata.

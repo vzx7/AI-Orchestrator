@@ -17,40 +17,42 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
-	"ai-orchestrator/internal/agents"
-	"ai-orchestrator/internal/events"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/agents"
+	"ai_orchestrator/internal/events"
+	"ai_orchestrator/internal/types"
 )
 
-// Engine manages the deterministic execution of tasks.
 type Engine struct {
-	config   types.ExecutionConfig
-	logger   *slog.Logger
-	eventBus *events.EventBus
-	agents   map[string]agents.Agent
+	config    types.ExecutionConfig
+	logger    *slog.Logger
+	eventBus  *events.EventBus
+	agents    map[string]agents.Agent
+	semaphore chan struct{}
+	stopCh    chan struct{}
+	stopped   bool
+	stopMu    sync.RWMutex
 }
 
-// NewEngine creates a new execution engine.
 func NewEngine(config types.ExecutionConfig, logger *slog.Logger, eventBus *events.EventBus) *Engine {
 	return &Engine{
-		config:   config,
-		logger:   logger,
-		eventBus: eventBus,
-		agents:   make(map[string]agents.Agent),
+		config:    config,
+		logger:    logger,
+		eventBus:  eventBus,
+		agents:    make(map[string]agents.Agent),
+		semaphore: make(chan struct{}, config.MaxParallelTasks),
+		stopCh:    make(chan struct{}),
 	}
 }
 
-// RegisterAgent adds an agent to the engine's registry.
 func (e *Engine) RegisterAgent(agent agents.Agent) {
 	e.agents[agent.Name()] = agent
 	e.logger.Info("Agent registered", "agent", agent.Name())
 }
 
-// ExecutePlan runs all tasks sequentially (V1 compatibility).
-// Deprecated: Use ExecutePlanDAG for DAG-based execution.
 func (e *Engine) ExecutePlan(ctx context.Context, plan types.Plan) ([]types.Result, error) {
 	e.logger.Info("Executing plan (sequential)", "plan_id", plan.ID, "task_count", len(plan.Nodes))
 
@@ -76,13 +78,6 @@ func (e *Engine) ExecutePlan(ctx context.Context, plan types.Plan) ([]types.Resu
 	return results, nil
 }
 
-// ExecutePlanDAG executes a DAG-structured plan respecting dependencies.
-//
-// Algorithm:
-// 1. Find all nodes with satisfied dependencies (no deps or all deps completed)
-// 2. Execute them (potentially in parallel)
-// 3. Mark as completed and repeat until all nodes are done
-// 4. Detect circular dependencies if progress stalls
 func (e *Engine) ExecutePlanDAG(ctx context.Context, plan types.Plan) ([]types.Result, error) {
 	e.logger.Info("Executing DAG plan",
 		"plan_id", plan.ID,
@@ -99,25 +94,34 @@ func (e *Engine) ExecutePlanDAG(ctx context.Context, plan types.Plan) ([]types.R
 		},
 	})
 
-	// Track state
-	completed := make(map[string]bool)        // taskID -> success
-	results := make(map[string]types.Result) // taskID -> Result
-	resultsMu := sync.Mutex{}
-
-	// Check for circular dependencies
 	if err := e.detectCircularDeps(plan.Nodes); err != nil {
 		return nil, fmt.Errorf("circular dependency detected: %w", err)
 	}
 
-	// Execute loop: keep going until all nodes are done
+	completed := make(map[string]bool)
+	results := make(map[string]types.Result)
+	resultsMu := sync.Mutex{}
+	taskWg := sync.WaitGroup{}
 	totalNodes := len(plan.Nodes)
+
 	for len(completed) < totalNodes {
-		// Find ready nodes (all dependencies satisfied)
+		select {
+		case <-ctx.Done():
+			e.logger.Warn("DAG execution cancelled", "plan_id", plan.ID)
+			taskWg.Wait()
+			return e.collectResults(plan.Nodes, results), ctx.Err()
+		case <-e.stopCh:
+			e.logger.Warn("DAG execution stopped", "plan_id", plan.ID)
+			taskWg.Wait()
+			return e.collectResults(plan.Nodes, results), fmt.Errorf("engine stopped")
+		default:
+		}
+
 		readyNodes := e.findReadyNodes(plan.Nodes, completed)
 
 		if len(readyNodes) == 0 {
-			// No progress made — something is wrong
 			if len(completed) < totalNodes {
+				taskWg.Wait()
 				return nil, fmt.Errorf("deadlock: %d/%d nodes completed, no ready nodes",
 					len(completed), totalNodes)
 			}
@@ -130,23 +134,50 @@ func (e *Engine) ExecutePlanDAG(ctx context.Context, plan types.Plan) ([]types.R
 			"remaining_count", totalNodes-len(completed),
 		)
 
-		// Execute ready nodes in parallel
-		var wg sync.WaitGroup
 		for _, node := range readyNodes {
-			wg.Add(1)
+			e.acquireSemaphore(ctx)
 
+			taskWg.Add(1)
 			go func(n types.TaskNode) {
-				defer wg.Done()
+				defer func() {
+					e.releaseSemaphore()
+					taskWg.Done()
+
+					if r := recover(); r != nil {
+						e.logger.Error("Panic recovered in DAG task goroutine",
+							"task_id", n.Task.ID,
+							"panic", r,
+							"stack", string(debug.Stack()),
+						)
+						resultsMu.Lock()
+						results[n.Task.ID] = types.Result{
+							TaskID:  n.Task.ID,
+							Success: false,
+							Error:   fmt.Sprintf("panic recovered: %v", r),
+						}
+						completed[n.Task.ID] = false
+						resultsMu.Unlock()
+					}
+				}()
 
 				select {
 				case <-ctx.Done():
-					e.logger.Warn("Task cancelled", "task_id", n.Task.ID)
 					resultsMu.Lock()
 					completed[n.Task.ID] = false
 					results[n.Task.ID] = types.Result{
 						TaskID:  n.Task.ID,
 						Success: false,
 						Error:   "cancelled",
+					}
+					resultsMu.Unlock()
+					return
+				case <-e.stopCh:
+					resultsMu.Lock()
+					completed[n.Task.ID] = false
+					results[n.Task.ID] = types.Result{
+						TaskID:  n.Task.ID,
+						Success: false,
+						Error:   "engine stopped",
 					}
 					resultsMu.Unlock()
 					return
@@ -167,46 +198,60 @@ func (e *Engine) ExecutePlanDAG(ctx context.Context, plan types.Plan) ([]types.R
 				}
 			}(node)
 		}
-
-		wg.Wait()
 	}
 
-	// Collect results in plan order
-	orderedResults := make([]types.Result, 0, totalNodes)
-	for _, node := range plan.Nodes {
-		if result, ok := results[node.Task.ID]; ok {
-			orderedResults = append(orderedResults, result)
-		}
-	}
+	taskWg.Wait()
 
 	e.eventBus.Publish(events.Event{
 		Type:   events.EventPlanCompleted,
 		Source: "execution_engine",
 		Payload: map[string]any{
 			"plan_id":       plan.ID,
-			"results_count": len(orderedResults),
+			"results_count": len(results),
 		},
 	})
 
 	e.logger.Info("DAG plan execution completed",
 		"plan_id", plan.ID,
-		"results", len(orderedResults),
+		"results", len(results),
 	)
 
-	return orderedResults, nil
+	return e.collectResults(plan.Nodes, results), nil
 }
 
-// findReadyNodes returns nodes whose dependencies are all satisfied.
+func (e *Engine) acquireSemaphore(ctx context.Context) {
+	select {
+	case e.semaphore <- struct{}{}:
+	case <-ctx.Done():
+	case <-e.stopCh:
+	}
+}
+
+func (e *Engine) releaseSemaphore() {
+	select {
+	case <-e.semaphore:
+	default:
+	}
+}
+
+func (e *Engine) collectResults(nodes []types.TaskNode, results map[string]types.Result) []types.Result {
+	orderedResults := make([]types.Result, 0, len(nodes))
+	for _, node := range nodes {
+		if result, ok := results[node.Task.ID]; ok {
+			orderedResults = append(orderedResults, result)
+		}
+	}
+	return orderedResults
+}
+
 func (e *Engine) findReadyNodes(nodes []types.TaskNode, completed map[string]bool) []types.TaskNode {
 	var ready []types.TaskNode
 
 	for _, node := range nodes {
-		// Skip already completed
 		if _, done := completed[node.Task.ID]; done {
 			continue
 		}
 
-		// Check all dependencies are satisfied
 		allDepsMet := true
 		for _, dep := range node.DependsOn {
 			if _, ok := completed[dep]; !ok {
@@ -223,9 +268,7 @@ func (e *Engine) findReadyNodes(nodes []types.TaskNode, completed map[string]boo
 	return ready
 }
 
-// detectCircularDeps performs a basic cycle detection using DFS.
 func (e *Engine) detectCircularDeps(nodes []types.TaskNode) error {
-	// Build adjacency map
 	adj := make(map[string][]string)
 	nodeIDs := make(map[string]bool)
 	for _, node := range nodes {
@@ -233,7 +276,6 @@ func (e *Engine) detectCircularDeps(nodes []types.TaskNode) error {
 		adj[node.Task.ID] = node.DependsOn
 	}
 
-	// DFS-based cycle detection
 	visited := make(map[string]bool)
 	recStack := make(map[string]bool)
 
@@ -267,7 +309,6 @@ func (e *Engine) detectCircularDeps(nodes []types.TaskNode) error {
 	return nil
 }
 
-// ExecuteTask runs a single task with retries, timeouts, and cancellation.
 func (e *Engine) ExecuteTask(ctx context.Context, task types.Task) (types.Result, error) {
 	agent, exists := e.agents[task.AssignedAgent]
 	if !exists {
@@ -278,7 +319,6 @@ func (e *Engine) ExecuteTask(ctx context.Context, task types.Task) (types.Result
 		}, fmt.Errorf("agent not found: %s", task.AssignedAgent)
 	}
 
-	// Apply defaults
 	if task.MaxRetries == 0 {
 		task.MaxRetries = e.config.MaxRetries
 	}
@@ -289,7 +329,6 @@ func (e *Engine) ExecuteTask(ctx context.Context, task types.Task) (types.Result
 	return e.executeWithRetry(ctx, task, agent)
 }
 
-// executeWithRetry handles task execution with exponential backoff retries.
 func (e *Engine) executeWithRetry(ctx context.Context, task types.Task, agent agents.Agent) (types.Result, error) {
 	var lastResult types.Result
 	var lastErr error
@@ -351,7 +390,6 @@ func (e *Engine) executeWithRetry(ctx context.Context, task types.Task, agent ag
 	return lastResult, lastErr
 }
 
-// executeWithTimeout runs a single task attempt with a timeout.
 func (e *Engine) executeWithTimeout(ctx context.Context, task types.Task, agent agents.Agent) (types.Result, error) {
 	task.Status = types.TaskStatusRunning
 
@@ -364,15 +402,25 @@ func (e *Engine) executeWithTimeout(ctx context.Context, task types.Task, agent 
 		},
 	})
 
-	// Create a timeout context
 	taskCtx, cancel := context.WithTimeout(ctx, task.Timeout)
 	defer cancel()
 
-	// Channel to receive the result
 	resultCh := make(chan types.Result, 1)
 	errCh := make(chan error, 1)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				e.logger.Error("Panic in agent execution",
+					"task_id", task.ID,
+					"agent", agent.Name(),
+					"panic", r,
+					"stack", string(debug.Stack()),
+				)
+				errCh <- fmt.Errorf("panic during agent execution: %v", r)
+			}
+		}()
+
 		result, err := agent.Execute(task)
 		if err != nil {
 			errCh <- err
@@ -424,4 +472,17 @@ func (e *Engine) executeWithTimeout(ctx context.Context, task types.Task, agent 
 		})
 		return result, nil
 	}
+}
+
+func (e *Engine) Stop() {
+	e.stopMu.Lock()
+	if e.stopped {
+		e.stopMu.Unlock()
+		return
+	}
+	e.stopped = true
+	close(e.stopCh)
+	e.stopMu.Unlock()
+
+	e.logger.Info("Engine stopped")
 }

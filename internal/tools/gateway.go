@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"time"
 
-	"ai-orchestrator/internal/mcp"
+	"ai_orchestrator/internal/mcp"
 )
 
 // ToolGateway sits between agents and MCP tools, enforcing security and observability.

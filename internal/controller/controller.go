@@ -16,40 +16,39 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
-	"ai-orchestrator/internal/events"
-	"ai-orchestrator/internal/evaluator"
-	"ai-orchestrator/internal/execution"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/evaluator"
+	"ai_orchestrator/internal/events"
+	"ai_orchestrator/internal/execution"
+	"ai_orchestrator/internal/types"
 )
 
-// Planner abstracts the planner for dependency injection.
 type Planner interface {
 	GeneratePlan(goal string) (types.Plan, error)
 	Replan(currentPlan types.Plan, failedTask types.Task, eval types.Evaluation) types.Plan
 }
 
-// TaskExecutor abstracts task execution for local or distributed modes.
 type TaskExecutor interface {
 	ExecuteTask(ctx context.Context, task types.Task) (types.Result, error)
 }
 
-// Controller orchestrates the adaptive Plan→Execute→Evaluate→Replan loop.
 type Controller struct {
-	planner   Planner
-	evaluator evaluator.Evaluator
-	engine    *execution.Engine
-	executor  TaskExecutor
-	logger    *slog.Logger
-	eventBus  *events.EventBus
-	config    types.ExecutionConfig
-	trace     types.ExecutionTrace
-	// V4: loop protection
+	planner       Planner
+	evaluator     evaluator.Evaluator
+	engine        *execution.Engine
+	executor      TaskExecutor
+	logger        *slog.Logger
+	eventBus      *events.EventBus
+	config        types.ExecutionConfig
+	trace         types.ExecutionTrace
 	maxIterations int
+	stopCh        chan struct{}
+	stopped       bool
+	stopMu        sync.RWMutex
 }
 
-// NewController creates a fully configured Controller.
 func NewController(
 	planner Planner,
 	eval evaluator.Evaluator,
@@ -62,27 +61,25 @@ func NewController(
 		planner:       planner,
 		evaluator:     eval,
 		engine:        engine,
-		executor:      engine, // default to local engine
+		executor:      engine,
 		logger:        logger,
 		eventBus:      eventBus,
 		config:        config,
 		trace:         types.ExecutionTrace{},
-		maxIterations: 1000, // V4: prevent infinite loops
+		maxIterations: 1000,
+		stopCh:        make(chan struct{}),
 	}
 }
 
-// SetMaxIterations sets the maximum control loop iterations (V4 loop protection).
 func (c *Controller) SetMaxIterations(n int) {
 	c.maxIterations = n
 }
 
-// SetExecutor overrides the task executor for distributed execution.
 func (c *Controller) SetExecutor(executor TaskExecutor) {
 	c.executor = executor
 	c.logger.Info("Task executor updated", "type", fmt.Sprintf("%T", executor))
 }
 
-// Run executes the full adaptive control loop for a user goal.
 func (c *Controller) Run(ctx context.Context, goal string) ([]types.Result, error) {
 	startTime := time.Now()
 	c.logger.Info("Controller started", "goal", goal)
@@ -93,7 +90,6 @@ func (c *Controller) Run(ctx context.Context, goal string) ([]types.Result, erro
 		Payload: map[string]any{"goal": goal},
 	})
 
-	// Step 1: Generate initial plan
 	plan, err := c.planner.GeneratePlan(goal)
 	if err != nil {
 		c.logger.Error("Failed to generate plan", "error", err)
@@ -103,10 +99,8 @@ func (c *Controller) Run(ctx context.Context, goal string) ([]types.Result, erro
 	c.trace.Goal = goal
 	c.trace.PlanID = plan.ID
 
-	// Step 2: Run the adaptive control loop
 	results, err := c.runControlLoop(ctx, plan)
 
-	// Step 3: Finalize trace
 	c.trace.TotalDuration = time.Since(startTime)
 
 	c.logger.Info("Controller completed",
@@ -117,13 +111,13 @@ func (c *Controller) Run(ctx context.Context, goal string) ([]types.Result, erro
 	)
 
 	c.eventBus.Publish(events.Event{
-		Type:    events.EventOrchestratorDone,
-		Source:  "controller",
+		Type:   events.EventOrchestratorDone,
+		Source: "controller",
 		Payload: map[string]any{
-			"goal":    goal,
-			"results": len(results),
-			"replans": c.trace.ReplanCount,
-			"success": err == nil,
+			"goal":     goal,
+			"results":  len(results),
+			"replans":  c.trace.ReplanCount,
+			"success":  err == nil,
 			"duration": c.trace.TotalDuration.String(),
 		},
 	})
@@ -131,18 +125,23 @@ func (c *Controller) Run(ctx context.Context, goal string) ([]types.Result, erro
 	return results, err
 }
 
-// runControlLoop executes the Plan→Execute→Evaluate→Replan cycle.
 func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]types.Result, error) {
 	allResults := make([]types.Result, 0)
-
-	// Track which nodes are done
 	completed := make(map[string]bool)
 
-	// V4: iteration counter for loop protection
 	iterations := 0
+	replansWithoutProgress := 0
+	prevCompletedCount := 0
 
-	// Main loop
 	for len(completed) < len(plan.Nodes) {
+		select {
+		case <-ctx.Done():
+			return allResults, ctx.Err()
+		case <-c.stopCh:
+			return allResults, fmt.Errorf("controller stopped")
+		default:
+		}
+
 		iterations++
 		if iterations > c.maxIterations {
 			c.logger.Error("Maximum iterations exceeded, aborting",
@@ -153,7 +152,6 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 			return allResults, fmt.Errorf("control loop exceeded max iterations (%d): possible infinite loop", c.maxIterations)
 		}
 
-		// Find ready nodes
 		readyNodes := c.findReadyNodes(plan.Nodes, completed)
 		if len(readyNodes) == 0 {
 			if len(completed) < len(plan.Nodes) {
@@ -169,18 +167,18 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 			"total_count", len(plan.Nodes),
 		)
 
-		// Execute each ready node
 		for _, node := range readyNodes {
 			select {
 			case <-ctx.Done():
 				return allResults, ctx.Err()
+			case <-c.stopCh:
+				return allResults, fmt.Errorf("controller stopped")
 			default:
 			}
 
 			stepStart := time.Now()
 			result, eval, stepErr := c.executeAndEvaluate(ctx, node.Task)
 
-			// Extract worker ID from result metadata (distributed mode)
 			workerID := ""
 			if result.Metadata != nil {
 				if wid, ok := result.Metadata["worker_id"].(string); ok {
@@ -209,34 +207,34 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 					"eval_retryable", eval.Retryable,
 				)
 
-				// V4: Evaluate retry vs replan decision
 				if eval.Retryable && node.Task.RetryCount < node.Task.MaxRetries {
-					// Retry handled by executor (executeWithRetry already exhausted)
 					completed[node.Task.ID] = false
 				} else if c.trace.ReplanCount < c.config.MaxReplans {
-					// Replan
 					c.logger.Info("Triggering replan",
 						"failed_task", node.Task.ID,
 						"replan_count", c.trace.ReplanCount+1,
 					)
 
-					completed[node.Task.ID] = false
-
 					plan = c.planner.Replan(plan, node.Task, eval)
 					c.trace.ReplanCount++
 					c.trace.PlanID = plan.ID
 
-					// Reset completed map for new plan
-					oldCompleted := make(map[string]bool)
-					for taskID := range completed {
-						for _, n := range plan.Nodes {
-							if n.Task.ID == taskID {
-								oldCompleted[taskID] = true
-								break
-							}
+					completed = c.rebuildCompletedMap(completed, plan.Nodes)
+
+					currentCompleted := len(completed)
+					if currentCompleted <= prevCompletedCount {
+						replansWithoutProgress++
+						if replansWithoutProgress >= 3 {
+							c.logger.Error("Replan not making progress, aborting",
+								"replans", c.trace.ReplanCount,
+								"completed", currentCompleted,
+							)
+							return allResults, fmt.Errorf("replan not making progress after %d attempts", replansWithoutProgress)
 						}
+					} else {
+						replansWithoutProgress = 0
 					}
-					completed = oldCompleted
+					prevCompletedCount = currentCompleted
 
 					continue
 				} else {
@@ -248,6 +246,7 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 				}
 			} else {
 				completed[node.Task.ID] = true
+				prevCompletedCount = len(completed)
 				c.logger.Info("Task succeeded", "task_id", node.Task.ID)
 			}
 		}
@@ -256,8 +255,19 @@ func (c *Controller) runControlLoop(ctx context.Context, plan types.Plan) ([]typ
 	return allResults, nil
 }
 
-// executeAndEvaluate runs a task and evaluates the result.
-// V4: Idempotency is handled by the executor layer.
+func (c *Controller) rebuildCompletedMap(completed map[string]bool, nodes []types.TaskNode) map[string]bool {
+	oldCompleted := make(map[string]bool)
+	for taskID := range completed {
+		for _, n := range nodes {
+			if n.Task.ID == taskID {
+				oldCompleted[taskID] = completed[taskID]
+				break
+			}
+		}
+	}
+	return oldCompleted
+}
+
 func (c *Controller) executeAndEvaluate(ctx context.Context, task types.Task) (types.Result, types.Evaluation, error) {
 	result, err := c.executor.ExecuteTask(ctx, task)
 	eval := c.evaluator.Evaluate(task, result)
@@ -273,7 +283,6 @@ func (c *Controller) executeAndEvaluate(ctx context.Context, task types.Task) (t
 	return result, eval, err
 }
 
-// findReadyNodes returns nodes whose dependencies are all satisfied.
 func (c *Controller) findReadyNodes(nodes []types.TaskNode, completed map[string]bool) []types.TaskNode {
 	var ready []types.TaskNode
 
@@ -298,7 +307,22 @@ func (c *Controller) findReadyNodes(nodes []types.TaskNode, completed map[string
 	return ready
 }
 
-// GetTrace returns the execution trace collected during the run.
 func (c *Controller) GetTrace() types.ExecutionTrace {
 	return c.trace
+}
+
+func (c *Controller) Stop() {
+	c.stopMu.Lock()
+	if c.stopped {
+		c.stopMu.Unlock()
+		return
+	}
+	c.stopped = true
+	close(c.stopCh)
+	c.stopMu.Unlock()
+
+	if c.engine != nil {
+		c.engine.Stop()
+	}
+	c.logger.Info("Controller stopped")
 }

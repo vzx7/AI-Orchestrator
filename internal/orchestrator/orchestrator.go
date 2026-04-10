@@ -15,37 +15,37 @@ import (
 	"context"
 	"log/slog"
 
-	"ai-orchestrator/internal/agents"
-	contextmanager "ai-orchestrator/internal/context"
-	"ai-orchestrator/internal/controller"
-	"ai-orchestrator/internal/dlq"
-	"ai-orchestrator/internal/events"
-	"ai-orchestrator/internal/evaluator"
-	"ai-orchestrator/internal/execution"
-	"ai-orchestrator/internal/executor"
-	"ai-orchestrator/internal/idempotency"
-	"ai-orchestrator/internal/mcp"
-	"ai-orchestrator/internal/planner"
-	"ai-orchestrator/internal/queue"
-	"ai-orchestrator/internal/registry"
-	"ai-orchestrator/internal/rpc"
-	"ai-orchestrator/internal/statestore"
-	toolsgateway "ai-orchestrator/internal/tools"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/agents"
+	contextmanager "ai_orchestrator/internal/context"
+	"ai_orchestrator/internal/controller"
+	"ai_orchestrator/internal/dlq"
+	"ai_orchestrator/internal/evaluator"
+	"ai_orchestrator/internal/events"
+	"ai_orchestrator/internal/execution"
+	"ai_orchestrator/internal/executor"
+	"ai_orchestrator/internal/idempotency"
+	"ai_orchestrator/internal/mcp"
+	"ai_orchestrator/internal/planner"
+	"ai_orchestrator/internal/queue"
+	"ai_orchestrator/internal/registry"
+	"ai_orchestrator/internal/rpc"
+	"ai_orchestrator/internal/statestore"
+	toolsgateway "ai_orchestrator/internal/tools"
+	"ai_orchestrator/internal/types"
 )
 
 // Orchestrator coordinates planning, execution, and tool access.
 // V4: Supports local and distributed modes with full reliability.
 type Orchestrator struct {
-	logger     *slog.Logger
-	eventBus   *events.EventBus
-	planGen    *planner.Planner
-	engine     *execution.Engine
-	ctrl       *controller.Controller
-	ctxMgr     *contextmanager.ContextManager
-	toolGW     *toolsgateway.ToolGateway
-	eval       evaluator.Evaluator
-	config     types.ExecutionConfig
+	logger   *slog.Logger
+	eventBus *events.EventBus
+	planGen  *planner.Planner
+	engine   *execution.Engine
+	ctrl     *controller.Controller
+	ctxMgr   *contextmanager.ContextManager
+	toolGW   *toolsgateway.ToolGateway
+	eval     evaluator.Evaluator
+	config   types.ExecutionConfig
 
 	// V4 distributed components
 	distExecutor *executor.DistributedExecutor
@@ -101,7 +101,7 @@ func NewOrchestrator(logger *slog.Logger, config types.ExecutionConfig) *Orchest
 	o.workerReg = registry.NewMemoryRegistry()
 	o.rpcClient = rpc.NewClientDefault(logger)
 	o.taskTracker = statestore.NewMemoryStore()
-	o.idempStore = idempotency.NewMemoryStore(10000) // 10k cached results
+	o.idempStore = idempotency.NewMemoryStore(10000)    // 10k cached results
 	o.deadLetter = dlq.NewDeadLetterQueue(logger, 1000) // 1k DLQ entries
 
 	o.distExecutor = executor.NewDistributedExecutor(
@@ -259,4 +259,19 @@ func (o *Orchestrator) GetDeadLetterQueue() *dlq.DeadLetterQueue {
 // GetIdempotencyStore returns the idempotency store.
 func (o *Orchestrator) GetIdempotencyStore() *idempotency.MemoryStore {
 	return o.idempStore
+}
+
+// Stop initiates graceful shutdown of all components.
+func (o *Orchestrator) Stop() {
+	o.logger.Info("Orchestrator stopping...")
+	if o.distExecutor != nil {
+		o.distExecutor.Stop()
+	}
+	if o.ctrl != nil {
+		o.ctrl.Stop()
+	}
+	if o.engine != nil {
+		o.engine.Stop()
+	}
+	o.logger.Info("Orchestrator stopped")
 }

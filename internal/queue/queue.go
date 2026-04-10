@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"sync"
 
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // BackpressurePolicy defines behavior when queue is full.
@@ -90,13 +90,13 @@ func (q *MemoryQueue) SetNackHandler(fn func(msg TaskMessage)) {
 
 // Enqueue adds a task message to the queue with backpressure control.
 func (q *MemoryQueue) Enqueue(ctx context.Context, msg TaskMessage) error {
-	q.mu.RLock()
+	q.mu.Lock()
 	if q.closed {
-		q.mu.RUnlock()
+		q.mu.Unlock()
 		return errors.New("queue is closed")
 	}
 	policy := q.policy
-	q.mu.RUnlock()
+	q.mu.Unlock()
 
 	switch policy {
 	case BackpressureReject:
@@ -189,6 +189,8 @@ func (q *MemoryQueue) Nack(taskID string, retry bool) error {
 
 // Size returns the number of pending tasks.
 func (q *MemoryQueue) Size() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	return len(q.pending)
 }
 

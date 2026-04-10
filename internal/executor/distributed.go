@@ -11,32 +11,38 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
-	"ai-orchestrator/internal/dlq"
-	"ai-orchestrator/internal/idempotency"
-	"ai-orchestrator/internal/queue"
-	"ai-orchestrator/internal/registry"
-	"ai-orchestrator/internal/rpc"
-	"ai-orchestrator/internal/statestore"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/dlq"
+	"ai_orchestrator/internal/idempotency"
+	"ai_orchestrator/internal/queue"
+	"ai_orchestrator/internal/registry"
+	"ai_orchestrator/internal/rpc"
+	"ai_orchestrator/internal/statestore"
+	"ai_orchestrator/internal/types"
 )
 
-// DistributedExecutor manages distributed task execution across workers.
+var ErrTaskNotFound = errors.New("task not found")
+
 type DistributedExecutor struct {
-	queue     *queue.MemoryQueue
-	registry  *registry.MemoryRegistry
-	client    *rpc.Client
-	tracker   *statestore.MemoryStore
+	queue      *queue.MemoryQueue
+	registry   *registry.MemoryRegistry
+	client     *rpc.Client
+	tracker    *statestore.MemoryStore
 	idempStore *idempotency.MemoryStore
 	deadLetter *dlq.DeadLetterQueue
-	logger    *slog.Logger
-	config    types.ExecutionConfig
+	logger     *slog.Logger
+	config     types.ExecutionConfig
+	workerWg   sync.WaitGroup
+	stopCh     chan struct{}
+	stopped    bool
+	stopMu     sync.RWMutex
 }
 
-// NewDistributedExecutor creates a new distributed executor with V4 reliability.
 func NewDistributedExecutor(
 	q *queue.MemoryQueue,
 	reg *registry.MemoryRegistry,
@@ -56,12 +62,11 @@ func NewDistributedExecutor(
 		deadLetter: deadLetter,
 		logger:     logger,
 		config:     config,
+		stopCh:     make(chan struct{}),
 	}
 }
 
-// ExecuteTask submits a task for distributed execution with idempotency and retries.
 func (de *DistributedExecutor) ExecuteTask(ctx context.Context, task types.Task) (types.Result, error) {
-	// Check idempotency cache first
 	if task.IdempotencyKey != "" && de.idempStore.Exists(task.IdempotencyKey) {
 		result, ok := de.idempStore.Get(task.IdempotencyKey)
 		if ok {
@@ -71,9 +76,9 @@ func (de *DistributedExecutor) ExecuteTask(ctx context.Context, task types.Task)
 			)
 			return result, nil
 		}
+		return types.Result{}, fmt.Errorf("%w: no cached result for key %s", ErrTaskNotFound, task.IdempotencyKey)
 	}
 
-	// Save initial state
 	state := statestore.TaskState{
 		TaskID:         task.ID,
 		IdempotencyKey: task.IdempotencyKey,
@@ -84,7 +89,6 @@ func (de *DistributedExecutor) ExecuteTask(ctx context.Context, task types.Task)
 	}
 	de.tracker.SaveTaskState(state)
 
-	// Apply defaults
 	if task.MaxRetries == 0 {
 		task.MaxRetries = de.config.MaxRetries
 	}
@@ -92,13 +96,21 @@ func (de *DistributedExecutor) ExecuteTask(ctx context.Context, task types.Task)
 		task.Timeout = de.config.DefaultTimeout
 	}
 
-	return de.executeWithRetry(ctx, task)
+	return de.executeWithQueueAndRetry(ctx, task)
 }
 
-// executeWithRetry handles task execution with retries across workers.
-func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.Task) (types.Result, error) {
-	var lastResult types.Result
-	var lastErr error
+func (de *DistributedExecutor) executeWithQueueAndRetry(ctx context.Context, task types.Task) (types.Result, error) {
+	msg := queue.TaskMessage{
+		TaskID:         task.ID,
+		Agent:          task.AssignedAgent,
+		Payload:        task,
+		IdempotencyKey: task.IdempotencyKey,
+	}
+
+	if err := de.queue.Enqueue(ctx, msg); err != nil {
+		de.logger.Error("Failed to enqueue task", "task_id", task.ID, "error", err)
+		return types.Result{}, fmt.Errorf("enqueue failed: %w", err)
+	}
 
 	for attempt := 0; attempt <= task.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -110,7 +122,6 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 				"backoff", backoff,
 			)
 
-			// Update state to requeued
 			state := statestore.TaskState{
 				TaskID:         task.ID,
 				IdempotencyKey: task.IdempotencyKey,
@@ -122,6 +133,7 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 
 			select {
 			case <-ctx.Done():
+				de.queue.Nack(task.ID, false)
 				return types.Result{
 					TaskID:  task.ID,
 					Success: false,
@@ -129,19 +141,19 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 				}, ctx.Err()
 			case <-time.After(backoff):
 			}
+
+			if err := de.queue.Enqueue(ctx, msg); err != nil {
+				de.logger.Error("Failed to re-enqueue task", "task_id", task.ID, "error", err)
+				return types.Result{}, fmt.Errorf("re-enqueue failed: %w", err)
+			}
 		}
 
-		result, err := de.executeOnce(ctx, task)
-		lastResult = result
-		lastErr = err
-
+		result, err := de.executeFromQueue(ctx, task)
 		if err == nil && result.Success {
-			// Store idempotency result
 			if task.IdempotencyKey != "" {
 				de.idempStore.Save(task.IdempotencyKey, result)
 			}
 
-			// Update state to done
 			resultJSON, _ := json.Marshal(result)
 			state := statestore.TaskState{
 				TaskID:         task.ID,
@@ -153,61 +165,77 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 			}
 			de.tracker.SaveTaskState(state)
 
+			de.queue.Ack(task.ID)
 			return result, nil
 		}
 
 		de.logger.Warn("Distributed task attempt failed",
 			"task_id", task.ID,
 			"attempt", attempt+1,
-			"error", lastErr,
+			"error", err,
 		)
 
-		// Update state with error
 		state := statestore.TaskState{
 			TaskID:         task.ID,
 			IdempotencyKey: task.IdempotencyKey,
 			State:          statestore.StateRunning,
 			Attempts:       attempt + 1,
-			LastError:      fmt.Sprintf("%v", lastErr),
+			LastError:      fmt.Sprintf("%v", err),
 			UpdatedAt:      time.Now(),
 		}
 		de.tracker.SaveTaskState(state)
+
+		if attempt >= task.MaxRetries {
+			de.queue.Nack(task.ID, false)
+			break
+		}
+
+		de.queue.Nack(task.ID, true)
 	}
 
-	// All retries exhausted — send to DLQ
 	de.logger.Error("Task exhausted all retries, sending to DLQ",
 		"task_id", task.ID,
 		"attempts", task.MaxRetries+1,
 	)
 
-	// Update state to failed
 	state := statestore.TaskState{
 		TaskID:         task.ID,
 		IdempotencyKey: task.IdempotencyKey,
 		State:          statestore.StateFailed,
 		Attempts:       task.MaxRetries + 1,
-		LastError:      fmt.Sprintf("failed after %d retries: %v", task.MaxRetries, lastErr),
+		LastError:      fmt.Sprintf("failed after %d retries", task.MaxRetries),
 		UpdatedAt:      time.Now(),
 	}
 	de.tracker.SaveTaskState(state)
 
-	// Push to DLQ
 	de.deadLetter.Push(queue.TaskMessage{
 		TaskID:  task.ID,
 		Agent:   task.AssignedAgent,
 		Payload: task,
 		Attempt: task.MaxRetries + 1,
-	}, fmt.Sprintf("exhausted %d retries: %v", task.MaxRetries, lastErr))
+	}, fmt.Sprintf("exhausted %d retries", task.MaxRetries))
 
-	lastResult.Success = false
-	lastResult.Error = fmt.Sprintf("failed after %d retries: %v", task.MaxRetries, lastErr)
-
-	return lastResult, lastErr
+	return types.Result{
+		TaskID:  task.ID,
+		Success: false,
+		Error:   fmt.Sprintf("failed after %d retries", task.MaxRetries),
+	}, fmt.Errorf("exhausted %d retries", task.MaxRetries)
 }
 
-// executeOnce executes a task once on a selected worker.
+func (de *DistributedExecutor) executeFromQueue(ctx context.Context, task types.Task) (types.Result, error) {
+	deadline := time.Now().Add(task.Timeout)
+	dequeueCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	_, err := de.queue.Dequeue(dequeueCtx)
+	if err != nil {
+		return types.Result{}, fmt.Errorf("dequeue failed: %w", err)
+	}
+
+	return de.executeOnce(ctx, task)
+}
+
 func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task) (types.Result, error) {
-	// Select least-loaded worker via registry
 	worker, err := de.registry.Next()
 	if err != nil {
 		return types.Result{
@@ -217,11 +245,11 @@ func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task)
 		}, err
 	}
 
-	// Create timeout context
+	de.registry.UpdateActiveTasks(worker.ID, worker.ActiveTasks+1)
+
 	taskCtx, cancel := context.WithTimeout(ctx, task.Timeout)
 	defer cancel()
 
-	// Update state to running
 	state := statestore.TaskState{
 		TaskID:         task.ID,
 		IdempotencyKey: task.IdempotencyKey,
@@ -239,18 +267,16 @@ func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task)
 		"worker_active_tasks", worker.ActiveTasks,
 	)
 
-	// Execute via RPC client (has built-in retry)
 	resp, err := de.client.ExecuteTask(taskCtx, worker.ID, task)
+
+	de.registry.UpdateActiveTasks(worker.ID, worker.ActiveTasks-1)
+
 	if err != nil {
 		de.logger.Error("RPC call failed",
 			"task_id", task.ID,
 			"worker_id", worker.ID,
 			"error", err,
 		)
-
-		// Decrement active tasks on failure
-		de.registry.UpdateActiveTasks(worker.ID, worker.ActiveTasks-1)
-
 		return types.Result{
 			TaskID:  task.ID,
 			Success: false,
@@ -258,7 +284,6 @@ func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task)
 		}, err
 	}
 
-	// Parse result
 	var result types.Result
 	if resp.Success && len(resp.Result) > 0 {
 		if err := json.Unmarshal(resp.Result, &result); err != nil {
@@ -272,7 +297,6 @@ func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task)
 	result.TaskID = task.ID
 	result.Timestamp = time.Now()
 
-	// Attach worker info to metadata
 	if result.Metadata == nil {
 		result.Metadata = make(map[string]any)
 	}
@@ -286,22 +310,34 @@ func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task)
 	return result, nil
 }
 
-// GetTracker returns the task state tracker for observability.
 func (de *DistributedExecutor) GetTracker() *statestore.MemoryStore {
 	return de.tracker
 }
 
-// GetQueue returns the task queue.
 func (de *DistributedExecutor) GetQueue() *queue.MemoryQueue {
 	return de.queue
 }
 
-// GetDeadLetter returns the dead letter queue.
 func (de *DistributedExecutor) GetDeadLetter() *dlq.DeadLetterQueue {
 	return de.deadLetter
 }
 
-// GetIdempotencyStore returns the idempotency store.
 func (de *DistributedExecutor) GetIdempotencyStore() *idempotency.MemoryStore {
 	return de.idempStore
+}
+
+func (de *DistributedExecutor) Stop() {
+	de.stopMu.Lock()
+	if de.stopped {
+		de.stopMu.Unlock()
+		return
+	}
+	de.stopped = true
+	close(de.stopCh)
+	de.stopMu.Unlock()
+
+	de.logger.Info("DistributedExecutor stopping, draining queue...")
+	de.queue.Close()
+	de.workerWg.Wait()
+	de.logger.Info("DistributedExecutor stopped")
 }

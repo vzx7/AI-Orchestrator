@@ -23,9 +23,9 @@ import (
 	"os"
 	"time"
 
-	"ai-orchestrator/internal/orchestrator"
-	"ai-orchestrator/internal/rpc"
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/orchestrator"
+	"ai_orchestrator/internal/rpc"
+	"ai_orchestrator/internal/types"
 )
 
 func main() {

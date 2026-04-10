@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"ai-orchestrator/internal/types"
+	"ai_orchestrator/internal/types"
 )
 
 // Store defines the interface for idempotency tracking.
