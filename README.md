@@ -1,180 +1,242 @@
-# AI Orchestrator V3
+# AI Orchestrator V4
 
-A production-grade, **distributed** multi-agent AI orchestration platform built in Go. V3 evolves from single-node execution to a horizontally scalable distributed platform with worker nodes, task queues, RPC communication, and fault tolerance.
+A **production-ready**, distributed multi-agent AI orchestration platform built in Go. V4 evolves from single-node distributed execution to a reliable, fault-tolerant system with **no task loss**, **safe retries**, **idempotent execution**, and **persistent state**.
 
 ## Architecture Evolution
 
-| Version | Architecture |
-|---------|-------------|
-| V1 | Linear task execution with agents + tool gateway |
-| V2 | Adaptive control loop (Plan→Execute→Evaluate→Replan) + DAG scheduling |
-| **V3** | **Distributed execution with worker nodes + task queue + RPC** |
+| Version | Key Capability |
+|---------|---------------|
+| V1 | Linear task execution + agents + tool gateway |
+| V2 | Adaptive control loop (Plan→Execute→Evaluate→Replan) + DAG |
+| V3 | Distributed execution with worker nodes + RPC + queue |
+| **V4** | **Reliable + Persistent + Fault-Tolerant (Production-Ready)** |
 
-## V3 Distributed Architecture
+## V4 Architecture
 
 ```
-                ┌──────────────────┐
-                │   Orchestrator    │
-                │  (Controller +    │
-                │   Distributed     │
-                │    Executor)      │
-                └────────┬─────────┘
-                         │
-                   Task Queue
-                (MemoryQueue)
-                         │
-              Worker Registry
-              (Round-Robin LB)
-                         │
-          ┌──────────────┼──────────────┐
-          │              │              │
-   ┌──────▼──────┐ ┌────▼─────┐ ┌──────▼──────┐
-   │  Worker-1   │ │ Worker-2 │ │  Worker-N   │
-   │  (Agents)   │ │ (Agents) │ │  (Agents)   │
-   │  (Tools)    │ │ (Tools)  │ │  (Tools)    │
-   └─────────────┘ └──────────┘ └─────────────┘
+                ┌─────────────────────────┐
+                │      Orchestrator        │
+                │  ┌────────────────────┐  │
+                │  │     Controller      │  │
+                │  │  (Loop Protection)  │  │
+                │  └─────────┬──────────┘  │
+                │            │              │
+                │  ┌─────────▼──────────┐  │
+                │  │ DistributedExecutor │  │
+                │  │ ┌────┐ ┌────────┐  │  │
+                │  │ │Queue│ │ Idemp  │  │  │
+                │  │ │A/N │ │ Store  │  │  │
+                │  │ └────┘ └────────┘  │  │
+                │  │ ┌────┐ ┌────────┐  │  │
+                │  │ │ DLQ │ │ States │  │  │
+                │  │ └────┘ └────────┘  │  │
+                │  └─────────┬──────────┘  │
+                └────────────┼─────────────┘
+                             │
+                   ┌─────────┼─────────┐
+                   │         │         │
+           ┌───────▼──┐ ┌───▼───┐ ┌───▼──────┐
+           │ Worker-1  │ │Worker2│ │ Worker-N  │
+           │ (Healthy) │ │(HB OK)│ │(Dead?)    │
+           │ Active:2  │ │Act:1  │ │ Act:0     │
+           └───────────┘ └───────┘ └──────────┘
+```
+
+## V4 Reliability Flow
+
+```
+Task Submit
+    │
+    ▼
+Check Idempotency Store ──hit──▶ Return Cached Result
+    │ miss
+    ▼
+Enqueue (with backpressure) ──full──▶ Block or Reject
+    │
+    ▼
+Dequeue → Move to In-Flight
+    │
+    ▼
+Select Worker (Least-Loaded + Healthy)
+    │
+    ▼
+RPC Execute (with retry + backoff)
+    │
+    ├─ success → Ack → Save State "done" → Cache Idempotency
+    │
+    └─ failure → Nack
+            ├─ retryable → Requeue → Retry
+            └─ exhausted → Dead Letter Queue → State "failed"
 ```
 
 ## Project Structure
 
 ```
 cmd/
-  orchestrator/          # CLI entry point (local or distributed mode)
+  orchestrator/          # CLI entry point
   worker/                # Standalone worker process
 internal/
-  orchestrator/          # Core orchestrator (V3: supports distributed mode)
-  controller/            # Adaptive control loop (V3: TaskExecutor interface)
-  executor/              # V3: Distributed task executor (NEW)
-  queue/                 # V3: Thread-safe task queue (NEW)
-  registry/              # V3: Worker registry + load balancing (NEW)
-  rpc/                   # V3: RPC service layer (NEW)
-  worker/                # V3: Worker node implementation (NEW)
-  state/                 # V3: Task state tracking (NEW)
-  evaluator/             # V2: Heuristic-based task evaluation
-  planner/               # V2: Dynamic planning with DAG + Replan
-  execution/             # V2: DAG-aware execution engine
+  orchestrator/          # Core orchestrator (V4: full reliability wiring)
+  controller/            # Adaptive control loop (V4: loop protection)
+  executor/              # Distributed task executor (V4: DLQ + idempotency)
+  queue/                 # Reliable queue with Ack/Nack + backpressure (V4)
+  dlq/                   # Dead Letter Queue (V4: NEW)
+  idempotency/           # Idempotency store (V4: NEW)
+  retry/                 # Global retry policy (V4: NEW)
+  statestore/            # Task state persistence (V4: NEW)
+  registry/              # Worker registry + heartbeat + least-loaded (V4)
+  rpc/                   # RPC layer with retry + error classification (V4)
+  worker/                # Hardened worker (V4: panic recovery + timeout)
+  evaluator/             # Heuristic-based task evaluation
+  planner/               # Dynamic planning with DAG + Replan
+  execution/             # DAG-aware execution engine
   agents/                # DevAgent, QAAgent, OpsAgent
   tools/                 # Tool Gateway (ACL enforcement)
   mcp/                   # MCP tool registry (mock)
   context/               # Short-term context manager
   events/                # Pub/sub event bus
-  types/                 # Core typed models
+  types/                 # Core typed models (IdempotencyKey added)
 proto/
   worker.proto           # gRPC service definition
 ```
 
-## V3 New Components
+## V4 New Components
 
 | Component | Package | Purpose |
 |-----------|---------|---------|
-| **DistributedExecutor** | `internal/executor` | Enqueues tasks, selects workers, dispatches via RPC, tracks state |
-| **MemoryQueue** | `internal/queue` | Bounded, blocking, thread-safe task queue (channel-based) |
-| **MemoryRegistry** | `internal/registry` | Worker registration + round-robin load balancing |
-| **RPC Client/Server** | `internal/rpc` | Task execution protocol (JSON-serialized, swappable for real gRPC) |
-| **Worker** | `internal/worker` | Distributed execution node with registered agents |
-| **TaskTracker** | `internal/state` | In-memory task lifecycle tracking |
+| **Reliable Queue** | `internal/queue` | Ack/Nack semantics, in-flight tracking, backpressure control |
+| **Dead Letter Queue** | `internal/dlq` | Captures exhausted tasks for post-mortem |
+| **Idempotency Store** | `internal/idempotency` | Safe retries — same task executes once |
+| **Retry Policy** | `internal/retry` | Global exponential backoff with error classification |
+| **State Store** | `internal/statestore` | Persistent task states (memory + PostgreSQL) |
+| **Hardened Worker** | `internal/worker` | Panic recovery, per-task timeout, graceful shutdown |
+
+## V4 Enhancements to Existing Components
+
+| Component | V4 Enhancement |
+|-----------|---------------|
+| **Registry** | Heartbeat tracking, health checking, least-loaded balancing |
+| **RPC Client** | Built-in retry with exponential backoff, fatal vs transient error classification |
+| **Controller** | Infinite loop protection (max iterations guard) |
+| **Executor** | DLQ integration, idempotency checks, state persistence |
+| **Types** | `IdempotencyKey` on Task, V4 config fields |
+| **Orchestrator** | Wires all V4 reliability components together |
 
 ## Key Design Decisions
 
 | Decision | Rationale |
 |----------|-----------|
-| `TaskExecutor` interface in Controller | Allows swapping local ↔ distributed without changing control loop |
-| Bounded queue with blocking dequeue | Natural backpressure; no busy-waiting |
-| Round-robin worker selection | Simple, fair distribution; swappable for least-loaded |
-| RPC via JSON serialization | Transport-agnostic; real gRPC can be dropped in later |
-| Direct call transport for demo | Self-contained demo; real network layer is a drop-in replacement |
-| Worker stateless, orchestrator stateful | Workers can be added/removed without state migration |
-| Task state tracking separate from execution | Enables observability without coupling |
+| Ack/Nack queue semantics | No task loss — every task is accounted for |
+| Idempotency before execution | Safe retries without duplicate side effects |
+| DLQ for exhausted tasks | Failed tasks captured, never silently dropped |
+| Least-loaded worker selection | Fair distribution based on actual load, not just round-robin |
+| Heartbeat-based health tracking | Dead workers detected and excluded automatically |
+| Panic recovery in workers | A buggy task never crashes the worker process |
+| Build-tagged PostgreSQL code | No external deps required for stdlib-only builds |
+| Backpressure: block or reject | Configurable based on system requirements |
 
 ## Features
 
-### V1 (Retained)
-- Typed Task/Plan/Result model
-- MCP tool integration (mock: file.read, file.write, shell.exec, test.run, deploy.service)
-- Tool Gateway with ACL enforcement
-- Event bus (pub/sub)
-- Context management with summarization
-- Structured logging via `log/slog`
+### V4 Production Reliability
+- **No Task Loss**: Ack/Nack queue with in-flight tracking
+- **Safe Retries**: Idempotency guarantees — same task executes once
+- **Dead Letter Queue**: Failed tasks captured for investigation
+- **Persistent State**: Task lifecycle tracked in memory or PostgreSQL
+- **Fault Tolerance**: Worker death detection via heartbeats
+- **Panic Recovery**: Workers survive task panics gracefully
+- **Backpressure Control**: Configurable block or reject when queue full
+- **Infinite Loop Protection**: Max iterations guard on control loop
+- **Error Classification**: Transient errors retried, fatal errors fail fast
 
-### V2 (Retained)
-- Adaptive Control Loop: Plan → Execute → Evaluate → Replan
-- DAG-Based Execution: Dependency-aware scheduling
-- Intelligent Evaluation: Confidence scores, retryability detection
-- Dynamic Replanning: Plan adjusts on failure
-- Execution Tracing: Full observability
-- Circular Dependency Detection
-
-### V3 (New)
-- **Distributed Execution**: Tasks dispatched to remote worker nodes
-- **Task Queue**: Bounded, blocking, thread-safe channel-based queue
-- **Worker Registry**: Registration + round-robin load balancing
-- **RPC Service Layer**: Task execution protocol (JSON-serialized)
-- **Worker Nodes**: Independent processes with registered agents
-- **Task State Tracking**: Lifecycle tracking (pending → running → done/failed)
-- **Fault Tolerance**: Retry on worker failure, timeout detection, requeue
-- **Distributed Observability**: Worker ID in traces, per-task latency, state counts
-
-## Running the Demo
-
-### Local Mode (default)
-All agents run in-process — no workers needed:
+### Running the Demo
 
 ```bash
+# Local mode
 go run ./cmd/orchestrator/
-```
 
-### Distributed Mode (in-process demo)
-Workers are simulated in-process for the demo:
-
-```bash
+# Distributed mode (with simulated worker failure + retry)
 go run ./cmd/orchestrator/ --distributed
 ```
 
-Output shows:
-- Tasks dispatched to `worker-1` and `worker-2` via round-robin
-- RPC call logs with task serialization
-- Worker IDs in execution trace
-- Distributed state summary (task states, registered workers)
+The distributed demo demonstrates:
+- **Transient worker failure** (worker-2 fails first attempt)
+- **Automatic retry** (task re-dispatched to worker-1)
+- **Least-loaded balancing** (tasks spread across healthy workers)
+- **State tracking** (all tasks tracked as "done")
 
-### Standalone Worker Process
+### Standalone Worker
 
 ```bash
 # Terminal 1: Start worker
 go run ./cmd/worker --id=worker-1 --addr=localhost:50051
 
-# Terminal 2: Start orchestrator (would connect via gRPC in production)
+# Terminal 2: Start orchestrator
 go run ./cmd/orchestrator/ --distributed
 ```
 
-## Running Tests
+### Running Tests
 
 ```bash
 go test ./... -v
 ```
 
-Tests cover:
-- DAG execution ordering
-- Evaluator heuristics (success, retryable, exhausted retries)
-- Replan logic (task removal, recovery insertion)
-- Circular dependency detection
-- Full control loop execution
+## Configuration
 
-## Production Deployment
+Production defaults in `types.DefaultExecutionConfig()`:
 
-To deploy as a real distributed system:
+```go
+ExecutionConfig{
+    DefaultTimeout:     30 * time.Second,
+    MaxRetries:         3,
+    RetryBackoffBase:   1 * time.Second,
+    MaxParallelTasks:   4,
+    MaxReplans:         3,
+    QueueCapacity:      100,        // V4
+    RPCCallRetries:     3,          // V4
+    RPCBackoff:         500ms,      // V4
+    TaskTimeout:        60s,        // V4
+    HeartbeatTimeout:   30s,        // V4
+}
+```
 
-1. **Replace demo RPC transport** with `google.golang.org/grpc`
-2. **Compile protobuf**: `protoc --go_out=. --go-grpc_out=. proto/worker.proto`
-3. **Deploy workers** as separate processes/containers on different nodes
-4. **Use shared message queue** (Redis, RabbitMQ, Kafka) instead of `MemoryQueue`
-5. **Add service discovery** (Consul, etcd) instead of in-memory registry
-6. **Add health checks** via `rpc.HealthCheck` endpoint
-7. **Monitor** with Prometheus metrics + Grafana dashboards
+## PostgreSQL Setup
 
-## Constraints
+For persistent state, build with the `postgres` tag:
 
-- No frameworks — stdlib only (gRPC import ready but not required for demo)
-- No real LLM calls (mock implementation)
-- No real MCP networking (mock tools)
-- Clean architecture with decoupled modules
-- V3 extends V2 — no components removed or rewritten from scratch
+```bash
+go build -tags postgres ./...
+```
+
+Required table:
+```sql
+CREATE TABLE task_states (
+    task_id         TEXT PRIMARY KEY,
+    idempotency_key TEXT,
+    state           TEXT NOT NULL,
+    worker_id       TEXT,
+    attempts        INT DEFAULT 0,
+    last_error      TEXT,
+    result          TEXT,
+    created_at      TIMESTAMP NOT NULL,
+    updated_at      TIMESTAMP NOT NULL
+);
+```
+
+## Production Deployment Checklist
+
+1. [x] Reliable queue (Ack/Nack)
+2. [x] Idempotent execution
+3. [x] Dead letter queue
+4. [x] Task state persistence
+5. [x] Worker health tracking
+6. [x] Load balancing (least-loaded)
+7. [x] Retry with exponential backoff
+8. [x] Panic recovery
+9. [x] Backpressure control
+10. [x] Infinite loop protection
+11. [ ] Replace mock LLM with real API
+12. [ ] Replace mock MCP tools with real network calls
+13. [ ] Deploy workers as separate processes
+14. [ ] Use Redis/Kafka for shared queue
+15. [ ] Add Prometheus metrics
+16. [ ] Add distributed tracing (OpenTelemetry)

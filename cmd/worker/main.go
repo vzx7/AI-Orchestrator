@@ -46,8 +46,9 @@ func main() {
 	toolRegistry := mcp.NewToolRegistry()
 	toolGW := toolsgateway.NewToolGateway(toolRegistry, logger)
 
-	// Create worker
-	w := worker.NewWorker(*workerID, logger, toolGW)
+	// Create worker with config
+	wCfg := worker.DefaultWorkerConfig()
+	w := worker.NewWorker(*workerID, logger, toolGW, wCfg)
 
 	// Register agents with tool access
 	devAgent := agents.NewDevAgent(toolGW, logger)

@@ -27,17 +27,18 @@ const (
 
 // Task represents a single unit of work to be executed by an agent.
 type Task struct {
-	ID            string         `json:"id"`
-	Goal          string         `json:"goal"`
-	Context       map[string]any `json:"context,omitempty"`
-	Constraints   []string       `json:"constraints,omitempty"`
-	AssignedAgent string         `json:"assigned_agent"`
-	Status        TaskStatus     `json:"status"`
-	RetryCount    int            `json:"retry_count"`
-	MaxRetries    int            `json:"max_retries"`
-	Timeout       time.Duration  `json:"timeout"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
+	ID             string         `json:"id"`
+	IdempotencyKey string         `json:"idempotency_key,omitempty"` // V4: idempotent execution
+	Goal           string         `json:"goal"`
+	Context        map[string]any `json:"context,omitempty"`
+	Constraints    []string       `json:"constraints,omitempty"`
+	AssignedAgent  string         `json:"assigned_agent"`
+	Status         TaskStatus     `json:"status"`
+	RetryCount     int            `json:"retry_count"`
+	MaxRetries     int            `json:"max_retries"`
+	Timeout        time.Duration  `json:"timeout"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
 // TaskNode wraps a Task with DAG dependency information.
@@ -91,17 +92,29 @@ type ExecutionConfig struct {
 	MaxRetries       int           `json:"max_retries"`
 	RetryBackoffBase time.Duration `json:"retry_backoff_base"`
 	MaxParallelTasks int           `json:"max_parallel_tasks"`
-	MaxReplans       int           `json:"max_replans"` // New: limit replan cycles
+	MaxReplans       int           `json:"max_replans"`
+	// V4 fields
+	QueueCapacity    int           `json:"queue_capacity"`
+	RPCCallRetries int           `json:"rpc_call_retries"`
+	RPCBackoff     time.Duration `json:"rpc_backoff"`
+	TaskTimeout    time.Duration `json:"task_timeout"` // Per-task timeout on workers
+	HeartbeatTimeout time.Duration `json:"heartbeat_timeout"`
 }
 
 // DefaultExecutionConfig returns production-ready defaults.
 func DefaultExecutionConfig() ExecutionConfig {
 	return ExecutionConfig{
-		DefaultTimeout:   30 * time.Second,
-		MaxRetries:       3,
-		RetryBackoffBase: 1 * time.Second,
-		MaxParallelTasks: 4,
-		MaxReplans:       3, // New V2 field
+		DefaultTimeout:     30 * time.Second,
+		MaxRetries:         3,
+		RetryBackoffBase:   1 * time.Second,
+		MaxParallelTasks:   4,
+		MaxReplans:         3,
+		// V4 defaults
+		QueueCapacity:      100,
+		RPCCallRetries:     3,
+		RPCBackoff:         500 * time.Millisecond,
+		TaskTimeout:        60 * time.Second,
+		HeartbeatTimeout:   30 * time.Second,
 	}
 }
 

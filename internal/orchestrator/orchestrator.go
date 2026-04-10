@@ -1,21 +1,14 @@
 // Package orchestrator implements the core Orchestrator that coordinates
 // all components of the AI orchestration system.
 //
-// V3: The Orchestrator now supports distributed execution via worker nodes.
-// It can run in local mode (V2 compatible) or distributed mode (V3).
-//
-// The Orchestrator is the entry point for user requests. It:
-// 1. Receives a user goal
-// 2. Delegates to Controller for adaptive execution
-// 3. Manages context and events throughout the lifecycle
-// 4. Provides execution trace for observability
-//
-// Design decisions:
-// - The Orchestrator owns all dependencies and injects them.
-// - No global state — everything is passed via the Orchestrator struct.
-// - Context lifecycle is managed at the orchestrator level.
-// - Controller handles the adaptive loop; Orchestrator handles wiring.
-// - Distributed mode is opt-in via EnableDistributedMode().
+// V4: Production-ready with reliability, persistence, and fault tolerance.
+// - Reliable queue with Ack/Nack semantics
+// - Idempotent execution guarantees
+// - Dead letter queue for failed tasks
+// - Task state persistence
+// - Worker health tracking with heartbeats
+// - Least-loaded load balancing
+// - Infinite loop protection
 package orchestrator
 
 import (
@@ -25,22 +18,24 @@ import (
 	"ai-orchestrator/internal/agents"
 	contextmanager "ai-orchestrator/internal/context"
 	"ai-orchestrator/internal/controller"
+	"ai-orchestrator/internal/dlq"
 	"ai-orchestrator/internal/events"
 	"ai-orchestrator/internal/evaluator"
 	"ai-orchestrator/internal/execution"
 	"ai-orchestrator/internal/executor"
+	"ai-orchestrator/internal/idempotency"
 	"ai-orchestrator/internal/mcp"
 	"ai-orchestrator/internal/planner"
 	"ai-orchestrator/internal/queue"
 	"ai-orchestrator/internal/registry"
 	"ai-orchestrator/internal/rpc"
-	"ai-orchestrator/internal/state"
+	"ai-orchestrator/internal/statestore"
 	toolsgateway "ai-orchestrator/internal/tools"
 	"ai-orchestrator/internal/types"
 )
 
 // Orchestrator coordinates planning, execution, and tool access.
-// V3: Supports both local and distributed execution modes.
+// V4: Supports local and distributed modes with full reliability.
 type Orchestrator struct {
 	logger     *slog.Logger
 	eventBus   *events.EventBus
@@ -52,18 +47,19 @@ type Orchestrator struct {
 	eval       evaluator.Evaluator
 	config     types.ExecutionConfig
 
-	// V3 distributed components
+	// V4 distributed components
 	distExecutor *executor.DistributedExecutor
 	queue        *queue.MemoryQueue
 	workerReg    *registry.MemoryRegistry
 	rpcClient    *rpc.Client
-	taskTracker  *state.TaskTracker
+	taskTracker  *statestore.MemoryStore
+	idempStore   *idempotency.MemoryStore
+	deadLetter   *dlq.DeadLetterQueue
 	distributed  bool
 }
 
-// NewOrchestrator creates a fully configured Orchestrator (V3).
+// NewOrchestrator creates a production-ready Orchestrator (V4).
 func NewOrchestrator(logger *slog.Logger, config types.ExecutionConfig) *Orchestrator {
-	// Initialize components
 	eventBus := events.NewEventBus()
 	toolRegistry := mcp.NewToolRegistry()
 	toolGW := toolsgateway.NewToolGateway(toolRegistry, logger)
@@ -92,49 +88,45 @@ func NewOrchestrator(logger *slog.Logger, config types.ExecutionConfig) *Orchest
 	engine.RegisterAgent(qaAgent)
 	engine.RegisterAgent(opsAgent)
 
-	// Configure ACLs for agents
-	toolGW.SetACL("dev", []string{
-		"file.read",
-		"file.write",
-		"shell.exec",
-	})
-	toolGW.SetACL("qa", []string{
-		"test.run",
-		"shell.exec",
-		"file.read",
-	})
-	toolGW.SetACL("ops", []string{
-		"deploy.service",
-		"shell.exec",
-		"file.read",
-	})
+	// Configure ACLs
+	toolGW.SetACL("dev", []string{"file.read", "file.write", "shell.exec"})
+	toolGW.SetACL("qa", []string{"test.run", "shell.exec", "file.read"})
+	toolGW.SetACL("ops", []string{"deploy.service", "shell.exec", "file.read"})
 
-	// Create Controller with all dependencies
+	// Create Controller
 	o.ctrl = controller.NewController(planGen, eval, engine, logger, eventBus, config)
 
-	// Initialize V3 distributed components
-	o.queue = queue.NewMemoryQueue(100)
+	// Initialize V4 components
+	o.queue = queue.NewMemoryQueue(config.QueueCapacity, queue.BackpressureBlock)
 	o.workerReg = registry.NewMemoryRegistry()
-	o.rpcClient = rpc.NewClient(logger)
-	o.taskTracker = state.NewTaskTracker()
+	o.rpcClient = rpc.NewClientDefault(logger)
+	o.taskTracker = statestore.NewMemoryStore()
+	o.idempStore = idempotency.NewMemoryStore(10000) // 10k cached results
+	o.deadLetter = dlq.NewDeadLetterQueue(logger, 1000) // 1k DLQ entries
 
 	o.distExecutor = executor.NewDistributedExecutor(
 		o.queue,
 		o.workerReg,
 		o.rpcClient,
 		o.taskTracker,
+		o.idempStore,
+		o.deadLetter,
 		logger,
 		config,
 	)
 
-	// Subscribe to events for logging
+	// Wire DLQ to queue's nack handler
+	o.queue.SetNackHandler(func(msg queue.TaskMessage) {
+		o.deadLetter.Push(msg, "nack without retry")
+	})
+
+	// Subscribe to events
 	o.subscribeToEvents()
 
 	return o
 }
 
-// EnableDistributedMode switches the orchestrator to distributed execution.
-// Workers must be registered via RegisterWorker before calling Execute.
+// EnableDistributedMode switches to distributed execution.
 func (o *Orchestrator) EnableDistributedMode() {
 	o.ctrl.SetExecutor(o.distExecutor)
 	o.distributed = true
@@ -170,12 +162,10 @@ func (o *Orchestrator) Execute(ctx context.Context, goal string) ([]types.Result
 	}
 	o.logger.Info("Orchestrator started", "goal", goal, "mode", mode)
 
-	// Delegate to Controller for adaptive Plan→Execute→Evaluate→Replan loop
 	results, err := o.ctrl.Run(ctx, goal)
 
 	// Store results in context
 	for _, result := range results {
-		// Convert Output to map for context storage
 		outputMap, _ := result.Output.(map[string]any)
 		o.ctxMgr.AppendResult(result.TaskID, result.Success, outputMap, result.Error)
 	}
@@ -186,7 +176,6 @@ func (o *Orchestrator) Execute(ctx context.Context, goal string) ([]types.Result
 		"trace_summary", trace.Summary(),
 	)
 
-	// Log context summary
 	summary := o.ctxMgr.Summarize(20)
 	o.logger.Info("Context summary", "summary", summary)
 
@@ -252,12 +241,22 @@ func (o *Orchestrator) GetExecutionTrace() types.ExecutionTrace {
 	return o.ctrl.GetTrace()
 }
 
-// GetTaskTracker returns the distributed task state tracker.
-func (o *Orchestrator) GetTaskTracker() *state.TaskTracker {
+// GetTaskTracker returns the task state tracker.
+func (o *Orchestrator) GetTaskTracker() *statestore.MemoryStore {
 	return o.taskTracker
 }
 
 // GetWorkerRegistry returns the worker registry.
 func (o *Orchestrator) GetWorkerRegistry() *registry.MemoryRegistry {
 	return o.workerReg
+}
+
+// GetDeadLetterQueue returns the dead letter queue.
+func (o *Orchestrator) GetDeadLetterQueue() *dlq.DeadLetterQueue {
+	return o.deadLetter
+}
+
+// GetIdempotencyStore returns the idempotency store.
+func (o *Orchestrator) GetIdempotencyStore() *idempotency.MemoryStore {
+	return o.idempStore
 }

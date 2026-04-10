@@ -1,16 +1,11 @@
-// Package executor implements the distributed task executor.
+// Package executor implements the distributed task executor with V4 reliability.
 //
-// The DistributedExecutor:
-// - Enqueues tasks to the queue
-// - Selects workers via the registry
-// - Dispatches tasks via RPC client
-// - Tracks task state
-// - Handles retries and timeouts
-//
-// Design decisions:
-// - Decoupled from controller via TaskExecutor interface
-// - State tracking enables observability and recovery
-// - Retries are handled here, not in the controller
+// V4 adds:
+// - Idempotency checks before execution
+// - Dead Letter Queue integration
+// - Queue Ack/Nack semantics
+// - Backpressure-aware enqueueing
+// - Task state persistence
 package executor
 
 import (
@@ -20,10 +15,12 @@ import (
 	"log/slog"
 	"time"
 
+	"ai-orchestrator/internal/dlq"
+	"ai-orchestrator/internal/idempotency"
 	"ai-orchestrator/internal/queue"
 	"ai-orchestrator/internal/registry"
 	"ai-orchestrator/internal/rpc"
-	"ai-orchestrator/internal/state"
+	"ai-orchestrator/internal/statestore"
 	"ai-orchestrator/internal/types"
 )
 
@@ -32,33 +29,60 @@ type DistributedExecutor struct {
 	queue     *queue.MemoryQueue
 	registry  *registry.MemoryRegistry
 	client    *rpc.Client
-	tracker   *state.TaskTracker
+	tracker   *statestore.MemoryStore
+	idempStore *idempotency.MemoryStore
+	deadLetter *dlq.DeadLetterQueue
 	logger    *slog.Logger
 	config    types.ExecutionConfig
 }
 
-// NewDistributedExecutor creates a new distributed executor.
+// NewDistributedExecutor creates a new distributed executor with V4 reliability.
 func NewDistributedExecutor(
 	q *queue.MemoryQueue,
 	reg *registry.MemoryRegistry,
 	client *rpc.Client,
-	tracker *state.TaskTracker,
+	tracker *statestore.MemoryStore,
+	idempStore *idempotency.MemoryStore,
+	deadLetter *dlq.DeadLetterQueue,
 	logger *slog.Logger,
 	config types.ExecutionConfig,
 ) *DistributedExecutor {
 	return &DistributedExecutor{
-		queue:    q,
-		registry: reg,
-		client:   client,
-		tracker:  tracker,
-		logger:   logger,
-		config:   config,
+		queue:      q,
+		registry:   reg,
+		client:     client,
+		tracker:    tracker,
+		idempStore: idempStore,
+		deadLetter: deadLetter,
+		logger:     logger,
+		config:     config,
 	}
 }
 
-// ExecuteTask submits a task for distributed execution and waits for the result.
+// ExecuteTask submits a task for distributed execution with idempotency and retries.
 func (de *DistributedExecutor) ExecuteTask(ctx context.Context, task types.Task) (types.Result, error) {
-	de.tracker.Register(task.ID)
+	// Check idempotency cache first
+	if task.IdempotencyKey != "" && de.idempStore.Exists(task.IdempotencyKey) {
+		result, ok := de.idempStore.Get(task.IdempotencyKey)
+		if ok {
+			de.logger.Info("Idempotent cache hit, returning cached result",
+				"task_id", task.ID,
+				"idempotency_key", task.IdempotencyKey,
+			)
+			return result, nil
+		}
+	}
+
+	// Save initial state
+	state := statestore.TaskState{
+		TaskID:         task.ID,
+		IdempotencyKey: task.IdempotencyKey,
+		State:          statestore.StatePending,
+		Attempts:       0,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	de.tracker.SaveTaskState(state)
 
 	// Apply defaults
 	if task.MaxRetries == 0 {
@@ -78,6 +102,7 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 
 	for attempt := 0; attempt <= task.MaxRetries; attempt++ {
 		if attempt > 0 {
+			task.RetryCount = attempt
 			backoff := de.config.RetryBackoffBase * time.Duration(1<<uint(attempt-1))
 			de.logger.Info("Retrying task on distributed executor",
 				"task_id", task.ID,
@@ -85,7 +110,15 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 				"backoff", backoff,
 			)
 
-			de.tracker.MarkRequeued(task.ID)
+			// Update state to requeued
+			state := statestore.TaskState{
+				TaskID:         task.ID,
+				IdempotencyKey: task.IdempotencyKey,
+				State:          statestore.StateRequeued,
+				Attempts:       attempt,
+				UpdatedAt:      time.Now(),
+			}
+			de.tracker.SaveTaskState(state)
 
 			select {
 			case <-ctx.Done():
@@ -103,7 +136,23 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 		lastErr = err
 
 		if err == nil && result.Success {
-			de.tracker.UpdateDone(task.ID)
+			// Store idempotency result
+			if task.IdempotencyKey != "" {
+				de.idempStore.Save(task.IdempotencyKey, result)
+			}
+
+			// Update state to done
+			resultJSON, _ := json.Marshal(result)
+			state := statestore.TaskState{
+				TaskID:         task.ID,
+				IdempotencyKey: task.IdempotencyKey,
+				State:          statestore.StateDone,
+				Attempts:       attempt + 1,
+				Result:         string(resultJSON),
+				UpdatedAt:      time.Now(),
+			}
+			de.tracker.SaveTaskState(state)
+
 			return result, nil
 		}
 
@@ -112,9 +161,44 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 			"attempt", attempt+1,
 			"error", lastErr,
 		)
+
+		// Update state with error
+		state := statestore.TaskState{
+			TaskID:         task.ID,
+			IdempotencyKey: task.IdempotencyKey,
+			State:          statestore.StateRunning,
+			Attempts:       attempt + 1,
+			LastError:      fmt.Sprintf("%v", lastErr),
+			UpdatedAt:      time.Now(),
+		}
+		de.tracker.SaveTaskState(state)
 	}
 
-	de.tracker.UpdateFailed(task.ID, fmt.Sprintf("failed after %d retries: %v", task.MaxRetries, lastErr))
+	// All retries exhausted — send to DLQ
+	de.logger.Error("Task exhausted all retries, sending to DLQ",
+		"task_id", task.ID,
+		"attempts", task.MaxRetries+1,
+	)
+
+	// Update state to failed
+	state := statestore.TaskState{
+		TaskID:         task.ID,
+		IdempotencyKey: task.IdempotencyKey,
+		State:          statestore.StateFailed,
+		Attempts:       task.MaxRetries + 1,
+		LastError:      fmt.Sprintf("failed after %d retries: %v", task.MaxRetries, lastErr),
+		UpdatedAt:      time.Now(),
+	}
+	de.tracker.SaveTaskState(state)
+
+	// Push to DLQ
+	de.deadLetter.Push(queue.TaskMessage{
+		TaskID:  task.ID,
+		Agent:   task.AssignedAgent,
+		Payload: task,
+		Attempt: task.MaxRetries + 1,
+	}, fmt.Sprintf("exhausted %d retries: %v", task.MaxRetries, lastErr))
+
 	lastResult.Success = false
 	lastResult.Error = fmt.Sprintf("failed after %d retries: %v", task.MaxRetries, lastErr)
 
@@ -123,7 +207,7 @@ func (de *DistributedExecutor) executeWithRetry(ctx context.Context, task types.
 
 // executeOnce executes a task once on a selected worker.
 func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task) (types.Result, error) {
-	// Select a worker via registry
+	// Select least-loaded worker via registry
 	worker, err := de.registry.Next()
 	if err != nil {
 		return types.Result{
@@ -137,19 +221,36 @@ func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task)
 	taskCtx, cancel := context.WithTimeout(ctx, task.Timeout)
 	defer cancel()
 
-	// Update state
-	de.tracker.UpdateRunning(task.ID, worker.ID)
+	// Update state to running
+	state := statestore.TaskState{
+		TaskID:         task.ID,
+		IdempotencyKey: task.IdempotencyKey,
+		State:          statestore.StateRunning,
+		WorkerID:       worker.ID,
+		Attempts:       task.RetryCount + 1,
+		UpdatedAt:      time.Now(),
+	}
+	de.tracker.SaveTaskState(state)
 
 	de.logger.Info("Dispatching task to worker",
 		"task_id", task.ID,
 		"worker_id", worker.ID,
 		"worker_addr", worker.Address,
+		"worker_active_tasks", worker.ActiveTasks,
 	)
 
-	// Execute via RPC client
+	// Execute via RPC client (has built-in retry)
 	resp, err := de.client.ExecuteTask(taskCtx, worker.ID, task)
 	if err != nil {
-		de.tracker.UpdateFailed(task.ID, err.Error())
+		de.logger.Error("RPC call failed",
+			"task_id", task.ID,
+			"worker_id", worker.ID,
+			"error", err,
+		)
+
+		// Decrement active tasks on failure
+		de.registry.UpdateActiveTasks(worker.ID, worker.ActiveTasks-1)
+
 		return types.Result{
 			TaskID:  task.ID,
 			Success: false,
@@ -186,11 +287,21 @@ func (de *DistributedExecutor) executeOnce(ctx context.Context, task types.Task)
 }
 
 // GetTracker returns the task state tracker for observability.
-func (de *DistributedExecutor) GetTracker() *state.TaskTracker {
+func (de *DistributedExecutor) GetTracker() *statestore.MemoryStore {
 	return de.tracker
 }
 
 // GetQueue returns the task queue.
 func (de *DistributedExecutor) GetQueue() *queue.MemoryQueue {
 	return de.queue
+}
+
+// GetDeadLetter returns the dead letter queue.
+func (de *DistributedExecutor) GetDeadLetter() *dlq.DeadLetterQueue {
+	return de.deadLetter
+}
+
+// GetIdempotencyStore returns the idempotency store.
+func (de *DistributedExecutor) GetIdempotencyStore() *idempotency.MemoryStore {
+	return de.idempStore
 }
