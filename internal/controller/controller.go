@@ -1,6 +1,6 @@
 // Package controller implements the adaptive orchestration control loop.
 //
-// V4 adds:
+// V5 adds:
 // - Retry policy integration for retry decisions
 // - Idempotency enforcement (skip duplicate tasks)
 // - Infinite loop protection (max iterations guard)

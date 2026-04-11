@@ -4,7 +4,15 @@ This file provides guidance for agentic coding agents working in this repository
 
 ## Project Overview
 
-AI Orchestrator V4 is a production-ready, distributed multi-agent AI orchestration platform built in Go (1.26.1). It implements fault-tolerant distributed task execution with gRPC communication.
+AI Orchestrator V5 is a production-ready, distributed multi-agent AI orchestration platform built in Go (1.26.1). It implements fault-tolerant distributed task execution with gRPC communication.
+
+V5 adds:
+- Circuit breaker for failure isolation
+- Visibility timeout reaper for stuck task recovery
+- Advanced retry with jitter
+- State transition validation
+- Latency-aware load balancing
+- Context manager with relevance scoring
 
 ## Build Commands
 
@@ -195,9 +203,8 @@ Every package should have a doc comment:
 ```go
 // Package queue implements reliable task queues with Ack/Nack semantics.
 //
-// V4 adds:
-// - Reliable queue with Ack/Nack/Requeue
-// - In-flight task tracking
+// V5 adds:
+// - Visibility timeout for stuck task recovery
 package queue
 ```
 
@@ -225,19 +232,21 @@ internal/
   orchestrator/          # Core orchestrator
   controller/            # Adaptive control loop
   executor/              # Distributed task executor
-  queue/                 # Reliable queue (Ack/Nack)
+  queue/                 # Reliable queue (Ack/Nack) | V5: visibility timeout
   dlq/                   # Dead Letter Queue
   idempotency/           # Idempotency store
-  retry/                 # Retry policy
-  statestore/            # Persistent state store
-  registry/              # Worker registry
+  retry/                 # Retry policy | V5: jitter support
+  resilience/            # V5: Circuit breaker
+  statestore/            # Persistent state store | V5: state transitions
+  registry/              # Worker registry | V5: latency-aware load balancing
   rpc/                   # RPC layer
   worker/                # Hardened worker
   agents/                # Agent implementations
   tools/                 # Tool Gateway
-  context/               # Context management
+  context/               # Context management | V5: relevance scoring
   events/                # Event bus
-  types/                 # Core type definitions
+  maintenance/           # V5: Background maintenance (reaper)
+  types/                 # Core type definitions | V5: safety limits
   planner/               # Dynamic planning
   execution/             # DAG-aware execution
 proto/
@@ -249,5 +258,8 @@ proto/
 - **Ack/Nack Queue**: Tasks are acknowledged or negatively-acknowledged; no task loss
 - **Idempotency**: Safe retries via idempotency keys prevent duplicate execution
 - **Dead Letter Queue**: Failed tasks after max retries go to DLQ for inspection
-- **Least-Loaded Balancing**: Workers selected by current active task count
+- **Least-Loaded Balancing**: Workers selected by current active task count + capacity
 - **Panic Recovery**: Workers survive task panics gracefully
+- **Circuit Breaker**: V5 - Prevents cascading failures to workers
+- **Visibility Timeout**: V5 - Automatic recovery of stuck tasks
+- **Retry with Jitter**: V5 - Prevents thundering herd on retries

@@ -1,5 +1,10 @@
 // Package contextmanager implements short-term context management for the orchestrator.
 //
+// V5 adds:
+// - MemoryItem with importance scoring
+// - RetrieveRelevant for context-aware retrieval
+// - Time-based and importance-based scoring
+//
 // The ContextManager stores step results, provides context retrieval,
 // and offers basic summarization capabilities. It acts as the memory
 // layer for the orchestration system, allowing agents and tasks to
@@ -8,10 +13,20 @@ package contextmanager
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
 )
+
+// MemoryItem represents a stored context item with scoring.
+type MemoryItem struct {
+	Key        string    `json:"key"`
+	Value      any       `json:"value"`
+	Score      float64   `json:"score"`
+	Timestamp  time.Time `json:"timestamp"`
+	Importance float64   `json:"importance"` // Manual importance 0-1
+}
 
 // ContextEntry represents a single piece of stored context.
 type ContextEntry struct {
@@ -27,15 +42,24 @@ type ContextEntry struct {
 // - In-memory store for low-latency access during a single orchestration run.
 // - For persistence across restarts, inject a storage backend interface.
 // - Thread-safe with RWMutex for concurrent read-heavy workloads.
+// V5: Added scoring for context relevance.
 type ContextManager struct {
 	mu      sync.RWMutex
 	entries []ContextEntry
+	memory  []MemoryItem
 }
+
+const (
+	scoreRecencyWeight    = 0.6
+	scoreImportanceWeight = 0.4
+	recencyDecayHours     = 24.0
+)
 
 // NewContextManager creates a new context manager.
 func NewContextManager() *ContextManager {
 	return &ContextManager{
 		entries: make([]ContextEntry, 0),
+		memory:  make([]MemoryItem, 0),
 	}
 }
 
@@ -152,4 +176,67 @@ func (cm *ContextManager) Count() int {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return len(cm.entries)
+}
+
+// AddMemory stores a memory item with automatic scoring.
+func (cm *ContextManager) AddMemory(key string, value any, importance float64) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	item := MemoryItem{
+		Key:        key,
+		Value:      value,
+		Importance: importance,
+		Timestamp:  time.Now(),
+	}
+
+	item.Score = cm.calculateScore(item)
+
+	cm.memory = append(cm.memory, item)
+}
+
+// calculateScore computes relevance score based on recency and importance.
+func (cm *ContextManager) calculateScore(item MemoryItem) float64 {
+	hoursOld := time.Since(item.Timestamp).Hours()
+	recencyScore := math.Max(0, 1.0-hoursOld/recencyDecayHours)
+	importanceScore := item.Importance
+
+	return recencyScore*scoreRecencyWeight + importanceScore*scoreImportanceWeight
+}
+
+// RetrieveRelevant returns top-N memory items by score.
+func (cm *ContextManager) RetrieveRelevant(limit int) []MemoryItem {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	if len(cm.memory) == 0 {
+		return nil
+	}
+
+	// Sort by score descending
+	sorted := make([]MemoryItem, len(cm.memory))
+	copy(sorted, cm.memory)
+
+	for i := 0; i < len(sorted)-1; i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].Score > sorted[i].Score {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	if limit > len(sorted) {
+		limit = len(sorted)
+	}
+	return sorted[:limit]
+}
+
+// GetMemory returns all memory items.
+func (cm *ContextManager) GetMemory() []MemoryItem {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+
+	result := make([]MemoryItem, len(cm.memory))
+	copy(result, cm.memory)
+	return result
 }

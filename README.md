@@ -1,18 +1,18 @@
-# AI Orchestrator V4
+# AI Orchestrator V5
 
-A **production-ready**, distributed multi-agent AI orchestration platform built in Go (1.26.1). V4 evolves from single-node distributed execution to a reliable, fault-tolerant system with **no task loss**, **safe retries**, **idempotent execution**, and **persistent state**.
+A **production-ready**, distributed multi-agent AI orchestration platform built in Go (1.26.1). V5 evolves V4 with **circuit breakers**, **visibility timeouts**, **jittered retries**, and **latency-aware load balancing** for enhanced reliability under failure and high load.
 
 ## Key Features
 
-- **No Task Loss**: Ack/Nack queue with in-flight tracking
-- **Safe Retries**: Idempotency guarantees — same task executes once
-- **Dead Letter Queue**: Failed tasks captured for investigation
-- **Persistent State**: Task lifecycle tracked in memory or PostgreSQL
-- **Fault Tolerance**: Worker death detection via heartbeats
-- **Panic Recovery**: Workers survive task panics gracefully
-- **Backpressure Control**: Configurable block or reject when queue full
-- **Infinite Loop Protection**: Max iterations guard on control loop
-- **Error Classification**: Transient errors retried, fatal errors fail fast
+- **No Stuck Tasks**: Visibility timeout reaper auto-recovers crashed worker tasks
+- **Circuit Breaker**: Prevents cascading failures to workers
+- **Retry with Jitter**: ±30% randomization prevents thundering herd
+- **State Validation**: Enforces valid state transitions only
+- **Latency-Aware Load Balancing**: Considers worker latency in selection
+- **Context Relevance Scoring**: Retrieves most relevant context items
+- **Safety Limits**: Max retries, execution time, tasks per workflow
+- **Graceful Shutdown**: Background maintenance loops with context support
+- All V4 features: Ack/Nack queue, idempotency, DLQ, persistent state
 
 ## Quick Start
 
@@ -43,7 +43,8 @@ go run ./cmd/orchestrator/ --distributed
 | V1 | Linear task execution + agents + tool gateway |
 | V2 | Adaptive control loop (Plan→Execute→Evaluate→Replan) + DAG |
 | V3 | Distributed execution with worker nodes + RPC + queue |
-| **V4** | **Reliable + Persistent + Fault-Tolerant (Production-Ready)** |
+| V4 | Reliable + Persistent + Fault-Tolerant (Production-Ready) |
+| **V5** | **Circuit Breaker + Visibility Timeout + Jitter + Relevance Scoring** |
 
 ## Running Tests
 
@@ -63,6 +64,12 @@ go test ./... -v
 - [x] Panic recovery
 - [x] Backpressure control
 - [x] Infinite loop protection
+- [x] Circuit breaker (V5)
+- [x] Visibility timeout reaper (V5)
+- [x] Retry with jitter (V5)
+- [x] State transition validation (V5)
+- [x] Latency-aware load balancing (V5)
+- [x] Context relevance scoring (V5)
 - [ ] Replace mock LLM with real API
 - [ ] Replace mock MCP tools with real network calls
 - [ ] Deploy workers as separate processes

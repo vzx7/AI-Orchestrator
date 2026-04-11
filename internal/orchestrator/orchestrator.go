@@ -1,7 +1,7 @@
 // Package orchestrator implements the core Orchestrator that coordinates
 // all components of the AI orchestration system.
 //
-// V4: Production-ready with reliability, persistence, and fault tolerance.
+// V5: Production-ready with reliability, persistence, and fault tolerance.
 // - Reliable queue with Ack/Nack semantics
 // - Idempotent execution guarantees
 // - Dead letter queue for failed tasks
@@ -35,7 +35,7 @@ import (
 )
 
 // Orchestrator coordinates planning, execution, and tool access.
-// V4: Supports local and distributed modes with full reliability.
+// V5: Supports local and distributed modes with full reliability.
 type Orchestrator struct {
 	logger   *slog.Logger
 	eventBus *events.EventBus
@@ -47,7 +47,7 @@ type Orchestrator struct {
 	eval     evaluator.Evaluator
 	config   types.ExecutionConfig
 
-	// V4 distributed components
+	// V5 distributed components
 	distExecutor *executor.DistributedExecutor
 	queue        *queue.MemoryQueue
 	workerReg    *registry.MemoryRegistry
@@ -58,7 +58,7 @@ type Orchestrator struct {
 	distributed  bool
 }
 
-// NewOrchestrator creates a production-ready Orchestrator (V4).
+// NewOrchestrator creates a production-ready Orchestrator (V5).
 func NewOrchestrator(logger *slog.Logger, config types.ExecutionConfig) *Orchestrator {
 	eventBus := events.NewEventBus()
 	toolRegistry := mcp.NewToolRegistry()
@@ -96,7 +96,7 @@ func NewOrchestrator(logger *slog.Logger, config types.ExecutionConfig) *Orchest
 	// Create Controller
 	o.ctrl = controller.NewController(planGen, eval, engine, logger, eventBus, config)
 
-	// Initialize V4 components
+	// Initialize V5 components
 	o.queue = queue.NewMemoryQueue(config.QueueCapacity, queue.BackpressureBlock)
 	o.workerReg = registry.NewMemoryRegistry()
 	o.rpcClient = rpc.NewClientDefault(logger)

@@ -1,9 +1,13 @@
 // Package registry implements worker registration, health tracking, and load balancing.
 //
-// V4 adds:
+// V5 adds:
 // - Worker heartbeat tracking
 // - Automatic removal of dead workers
 // - Least-loaded load balancing (replaces round-robin)
+//
+// V5 adds:
+// - WorkerMetrics for latency-aware load balancing
+// - Capacity-aware worker selection
 package registry
 
 import (
@@ -11,6 +15,14 @@ import (
 	"sync"
 	"time"
 )
+
+// WorkerMetrics holds performance metrics for a worker used in load balancing.
+type WorkerMetrics struct {
+	ActiveTasks int           `json:"active_tasks"`
+	Capacity    int           `json:"capacity"`
+	AvgLatency  time.Duration `json:"avg_latency"`
+	LastLatency time.Duration `json:"last_latency"`
+}
 
 // WorkerInfo represents a registered worker node with health tracking.
 type WorkerInfo struct {
@@ -20,6 +32,7 @@ type WorkerInfo struct {
 	LastHeartbeat time.Time `json:"last_heartbeat"`
 	ActiveTasks   int       `json:"active_tasks"`
 	Healthy       bool      `json:"healthy"`
+	Metrics       WorkerMetrics
 }
 
 // WorkerRegistry defines the interface for worker management.
@@ -36,14 +49,18 @@ type WorkerRegistry interface {
 	Next() (WorkerInfo, error)
 	// UpdateActiveTasks sets the active task count for a worker.
 	UpdateActiveTasks(workerID string, count int)
+	// UpdateLatency records latency for a worker.
+	UpdateLatency(workerID string, latency time.Duration)
+	// GetMetrics returns metrics for a specific worker.
+	GetMetrics(workerID string) (WorkerMetrics, error)
 }
 
 // MemoryRegistry implements WorkerRegistry with least-loaded balancing.
 type MemoryRegistry struct {
 	mu        sync.RWMutex
 	workers   map[string]*WorkerInfo
-	order     []string // maintains insertion order
-	heartbeat time.Duration // heartbeat timeout threshold
+	order     []string
+	heartbeat time.Duration
 }
 
 // NewMemoryRegistry creates a worker registry with health checking.
@@ -51,7 +68,7 @@ func NewMemoryRegistry() *MemoryRegistry {
 	return &MemoryRegistry{
 		workers:   make(map[string]*WorkerInfo),
 		order:     make([]string, 0),
-		heartbeat: 30 * time.Second, // default heartbeat timeout
+		heartbeat: 30 * time.Second,
 	}
 }
 
@@ -116,7 +133,35 @@ func (r *MemoryRegistry) UpdateActiveTasks(workerID string, count int) {
 
 	if w, exists := r.workers[workerID]; exists {
 		w.ActiveTasks = count
+		w.Metrics.ActiveTasks = count
 	}
+}
+
+// UpdateLatency records latency for a worker and updates running average.
+func (r *MemoryRegistry) UpdateLatency(workerID string, latency time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if w, exists := r.workers[workerID]; exists {
+		w.Metrics.LastLatency = latency
+		if w.Metrics.AvgLatency == 0 {
+			w.Metrics.AvgLatency = latency
+		} else {
+			w.Metrics.AvgLatency = (w.Metrics.AvgLatency*9 + latency) / 10
+		}
+	}
+}
+
+// GetMetrics returns metrics for a specific worker.
+func (r *MemoryRegistry) GetMetrics(workerID string) (WorkerMetrics, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	w, exists := r.workers[workerID]
+	if !exists {
+		return WorkerMetrics{}, fmt.Errorf("worker not found: %s", workerID)
+	}
+	return w.Metrics, nil
 }
 
 // List returns all registered workers.
@@ -132,12 +177,14 @@ func (r *MemoryRegistry) List() []WorkerInfo {
 	return result
 }
 
-// Next selects the least-loaded healthy worker.
+// Next selects the least-loaded healthy worker with capacity consideration.
 //
 // Strategy:
 // 1. Filter to healthy workers only
 // 2. Remove workers with heartbeat timeout
-// 3. Select worker with fewest active tasks (least-loaded)
+// 3. Filter out workers at capacity
+// 4. Select worker with fewest active tasks (least-loaded)
+// 5. Optionally consider latency for tie-breaking
 func (r *MemoryRegistry) Next() (WorkerInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -159,8 +206,20 @@ func (r *MemoryRegistry) Next() (WorkerInfo, error) {
 			continue
 		}
 
-		if best == nil || w.ActiveTasks < best.ActiveTasks {
+		// Skip workers at capacity
+		if w.ActiveTasks >= w.Capacity {
+			continue
+		}
+
+		// Score: prefer fewer active tasks, then lower latency
+		if best == nil {
 			best = w
+		} else {
+			if w.ActiveTasks < best.ActiveTasks {
+				best = w
+			} else if w.ActiveTasks == best.ActiveTasks && w.Metrics.AvgLatency < best.Metrics.AvgLatency {
+				best = w
+			}
 		}
 	}
 
@@ -170,6 +229,7 @@ func (r *MemoryRegistry) Next() (WorkerInfo, error) {
 
 	// Increment active tasks count
 	best.ActiveTasks++
+	best.Metrics.ActiveTasks++
 
 	return *best, nil
 }

@@ -1,5 +1,9 @@
 // Package retry implements a global retry policy with exponential backoff.
 //
+// V5 adds:
+// - Jitter for preventing retry storms
+// - Configurable jitter factor
+//
 // The retry policy is applied uniformly across:
 // - RPC calls
 // - Task execution
@@ -8,34 +12,41 @@ package retry
 
 import (
 	"context"
+	"math/rand"
 	"time"
 )
 
-// Policy defines a retry strategy with exponential backoff.
+// Policy defines a retry strategy with exponential backoff and optional jitter.
 type Policy struct {
-	MaxAttempts int           // Maximum number of attempts (including the first)
-	Backoff     time.Duration // Initial backoff duration
-	Multiplier  float64       // Multiplier for exponential growth
-	MaxBackoff  time.Duration // Upper bound on backoff duration
+	MaxAttempts  int           // Maximum number of attempts (including the first)
+	Backoff      time.Duration // Initial backoff duration
+	Multiplier   float64       // Multiplier for exponential growth
+	MaxBackoff   time.Duration // Upper bound on backoff duration
+	Jitter       bool          // Whether to add random jitter to backoff
+	JitterFactor float64       // Jitter factor (0.3 = ±30%)
 }
 
 // DefaultPolicy returns a production-ready retry policy.
 func DefaultPolicy() Policy {
 	return Policy{
-		MaxAttempts: 5,
-		Backoff:     1 * time.Second,
-		Multiplier:  2.0,
-		MaxBackoff:  30 * time.Second,
+		MaxAttempts:  5,
+		Backoff:      1 * time.Second,
+		Multiplier:   2.0,
+		MaxBackoff:   30 * time.Second,
+		Jitter:       true,
+		JitterFactor: 0.3,
 	}
 }
 
 // NoRetryPolicy returns a policy that never retries.
 func NoRetryPolicy() Policy {
 	return Policy{
-		MaxAttempts: 1,
-		Backoff:     0,
-		Multiplier:  1.0,
-		MaxBackoff:  0,
+		MaxAttempts:  1,
+		Backoff:      0,
+		Multiplier:   1.0,
+		MaxBackoff:   0,
+		Jitter:       false,
+		JitterFactor: 0,
 	}
 }
 
@@ -63,6 +74,16 @@ func (p Policy) Do(ctx context.Context, fn func() error) error {
 		backoff := p.Backoff * time.Duration(uint(1)<<(attempt-1))
 		if backoff > p.MaxBackoff {
 			backoff = p.MaxBackoff
+		}
+
+		// Add jitter to prevent thundering herd
+		if p.Jitter && p.JitterFactor > 0 {
+			jitter := float64(backoff) * p.JitterFactor
+			random := jitter * (2*rand.Float64() - 1)
+			backoff = time.Duration(float64(backoff) + random)
+			if backoff < 0 {
+				backoff = p.Backoff
+			}
 		}
 
 		// Wait with context awareness

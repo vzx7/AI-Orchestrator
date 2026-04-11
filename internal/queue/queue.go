@@ -1,10 +1,8 @@
 // Package queue implements reliable task queues with Ack/Nack semantics.
 //
-// V4 adds:
-// - Reliable queue with Ack/Nack/Requeue
-// - In-flight task tracking
-// - Dead letter queue integration
-// - Backpressure control (block or reject)
+// V5 adds:
+// - Visibility timeout for stuck task recovery
+// - Background reaper for automatic task reprocessing
 package queue
 
 import (
@@ -12,9 +10,22 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"ai_orchestrator/internal/types"
 )
+
+type VisibilityConfig struct {
+	Timeout       time.Duration
+	CheckInterval time.Duration
+}
+
+func DefaultVisibilityConfig() VisibilityConfig {
+	return VisibilityConfig{
+		Timeout:       60 * time.Second,
+		CheckInterval: 10 * time.Second,
+	}
+}
 
 // BackpressurePolicy defines behavior when queue is full.
 type BackpressurePolicy string
@@ -63,21 +74,38 @@ type TaskQueue interface {
 // - On Nack(retry=true): move back to pending
 // - On Nack(retry=false): drop (send to DLQ externally)
 type MemoryQueue struct {
-	pending     chan TaskMessage
-	inFlight    map[string]TaskMessage
-	mu          sync.RWMutex
-	closed      bool
-	policy      BackpressurePolicy
-	nackHandler func(msg TaskMessage) // called on Nack(retry=false) for DLQ
+	pending          chan TaskMessage
+	inFlight         map[string]TaskMessage
+	inFlightTimes    map[string]time.Time // V5: timestamps for visibility timeout
+	mu               sync.RWMutex
+	closed           bool
+	policy           BackpressurePolicy
+	nackHandler      func(msg TaskMessage)
+	visibilityConfig VisibilityConfig
+}
+
+// inFlightEntry holds task with its start time for visibility timeout tracking.
+type inFlightEntry struct {
+	Message   TaskMessage
+	StartTime time.Time
 }
 
 // NewMemoryQueue creates a reliable memory queue.
 func NewMemoryQueue(capacity int, policy BackpressurePolicy) *MemoryQueue {
 	return &MemoryQueue{
-		pending:  make(chan TaskMessage, capacity),
-		inFlight: make(map[string]TaskMessage),
-		policy:   policy,
+		pending:          make(chan TaskMessage, capacity),
+		inFlight:         make(map[string]TaskMessage),
+		inFlightTimes:    make(map[string]time.Time),
+		policy:           policy,
+		visibilityConfig: DefaultVisibilityConfig(),
 	}
+}
+
+// SetVisibilityConfig sets the visibility timeout configuration.
+func (q *MemoryQueue) SetVisibilityConfig(cfg VisibilityConfig) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.visibilityConfig = cfg
 }
 
 // SetNackHandler sets a callback for tasks that are nacked without retry.
@@ -133,6 +161,7 @@ func (q *MemoryQueue) Dequeue(ctx context.Context) (TaskMessage, error) {
 		}
 		q.mu.Lock()
 		q.inFlight[msg.TaskID] = msg
+		q.inFlightTimes[msg.TaskID] = time.Now()
 		q.mu.Unlock()
 		return msg, nil
 	case <-ctx.Done():
@@ -150,6 +179,7 @@ func (q *MemoryQueue) Ack(taskID string) error {
 	}
 
 	delete(q.inFlight, taskID)
+	delete(q.inFlightTimes, taskID)
 	return nil
 }
 
@@ -163,6 +193,7 @@ func (q *MemoryQueue) Nack(taskID string, retry bool) error {
 	}
 
 	delete(q.inFlight, taskID)
+	delete(q.inFlightTimes, taskID)
 	q.mu.Unlock()
 
 	if retry {
@@ -216,4 +247,48 @@ func (q *MemoryQueue) IsClosed() bool {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 	return q.closed
+}
+
+// ReapTimedOutTasks moves tasks that exceeded visibility timeout back to pending.
+// Returns the number of tasks reaped.
+func (q *MemoryQueue) ReapTimedOutTasks() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	timeout := q.visibilityConfig.Timeout
+	var reaped []string
+
+	for taskID, startTime := range q.inFlightTimes {
+		if time.Since(startTime) > timeout {
+			reaped = append(reaped, taskID)
+		}
+	}
+
+	for _, taskID := range reaped {
+		msg := q.inFlight[taskID]
+		delete(q.inFlight, taskID)
+		delete(q.inFlightTimes, taskID)
+
+		select {
+		case q.pending <- msg:
+		default:
+			if q.nackHandler != nil {
+				q.nackHandler(msg)
+			}
+		}
+	}
+
+	return len(reaped)
+}
+
+// GetInFlightTimes returns a copy of in-flight task timestamps for debugging.
+func (q *MemoryQueue) GetInFlightTimes() map[string]time.Time {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	result := make(map[string]time.Time)
+	for k, v := range q.inFlightTimes {
+		result[k] = v
+	}
+	return result
 }

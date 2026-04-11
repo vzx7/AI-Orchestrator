@@ -1,6 +1,6 @@
-// Package executor implements the distributed task executor with V4 reliability.
+// Package executor implements the distributed task executor with V5 reliability.
 //
-// V4 adds:
+// V5 adds:
 // - Idempotency checks before execution
 // - Dead Letter Queue integration
 // - Queue Ack/Nack semantics

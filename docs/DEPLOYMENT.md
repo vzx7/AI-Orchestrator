@@ -1,6 +1,6 @@
-# AI Orchestrator V4 - Deployment Guide
+# AI Orchestrator V5 - Deployment Guide
 
-A comprehensive guide to deploying AI Orchestrator V4 in development and production environments.
+A comprehensive guide to deploying AI Orchestrator V5 in development and production environments.
 
 ## Table of Contents
 
@@ -9,11 +9,12 @@ A comprehensive guide to deploying AI Orchestrator V4 in development and product
 3. [Quick Start](#quick-start)
 4. [Local Development](#local-development)
 5. [Distributed Mode](#distributed-mode)
-6. [MCP Server Integration](#mcp-server-integration)
-7. [Configuration](#configuration)
-8. [PostgreSQL Setup](#postgresql-setup)
-9. [Production Deployment](#production-deployment)
-10. [Troubleshooting](#troubleshooting)
+6. [V5 New Features](#v5-new-features)
+7. [MCP Server Integration](#mcp-server-integration)
+8. [Configuration](#configuration)
+9. [PostgreSQL Setup](#postgresql-setup)
+10. [Production Deployment](#production-deployment)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -54,14 +55,17 @@ A comprehensive guide to deploying AI Orchestrator V4 in development and product
 ### Key Components
 
 | Component | Package | Purpose |
-|-----------|--------|---------|
+|-----------|---------|---------|
 | **Reliable Queue** | `internal/queue` | Ack/Nack semantics, in-flight tracking |
+| **Visibility Timeout** | `internal/queue` | V5: Auto-recover stuck tasks |
 | **Dead Letter Queue** | `internal/dlq` | Captures exhausted tasks |
 | **Idempotency Store** | `internal/idempotency` | Safe retries — same task = once |
-| **Retry Policy** | `internal/retry` | Exponential backoff |
-| **State Store** | `internal/statestore` | Persistent task states |
+| **Retry Policy** | `internal/retry` | V5: Exponential backoff + jitter |
+| **Circuit Breaker** | `internal/resilience` | V5: Failure isolation |
+| **State Store** | `internal/statestore` | V5: State transition validation |
 | **Hardened Worker** | `internal/worker` | Panic recovery, timeout |
-| **Worker Registry** | `internal/registry` | Health tracking, least-loaded |
+| **Worker Registry** | `internal/registry` | V5: Latency-aware load balancing |
+| **Visibility Reaper** | `internal/maintenance` | V5: Background task recovery |
 
 ---
 
@@ -124,12 +128,12 @@ go mod download
 go run ./cmd/orchestrator/
 
 # Expected output:
-# INFO: AI Orchestrator V4 — Local Mode
+# INFO: AI Orchestrator V5 — Local Mode
 # INFO: User goal: Fix failing test and deploy service
 # INFO: === Execution Results ===
 # INFO: Result 1: task_id=xxx, status=SUCCESS
 # INFO: Result 2: task_id=xxx, status=SUCCESS
-# INFO: V4 Demo Complete
+# INFO: V5 Demo Complete
 ```
 
 ---
@@ -227,6 +231,118 @@ Workers send heartbeats every 10 seconds. If no heartbeat for 30 seconds, worker
 
 ---
 
+## V5 New Features
+
+### Circuit Breaker
+
+Prevents cascading failures by rejecting calls to failing workers:
+
+```go
+import "ai_orchestrator/internal/resilience"
+
+cb := resilience.NewCircuitBreaker(resilience.DefaultConfig())
+
+err := cb.Execute(func() error {
+    return worker.ExecuteTask(ctx, task)
+})
+
+if errors.Is(err, resilience.ErrCircuitOpen) {
+    // Worker is unavailable, try another worker
+}
+```
+
+States: `closed` → `open` (after 5 failures) → `half-open` (after 30s) → `closed`
+
+### Visibility Timeout Reaper
+
+Automatically recovers tasks stuck in "processing" when workers crash:
+
+```go
+import "ai_orchestrator/internal/maintenance"
+import "ai_orchestrator/internal/queue"
+
+q := queue.NewMemoryQueue(100, queue.BackpressureBlock)
+q.SetVisibilityConfig(queue.VisibilityConfig{
+    Timeout:       60 * time.Second,
+    CheckInterval: 10 * time.Second,
+})
+
+reaper := maintenance.NewVisibilityReaper(logger, q, maintenance.DefaultReaperConfig())
+ctx, cancel := context.WithCancel(context.Background())
+reaper.Start(ctx)
+
+// On shutdown
+reaper.Stop()
+defer cancel()
+```
+
+### Retry with Jitter
+
+Prevents thundering herd on retries:
+
+```go
+policy := retry.DefaultPolicy()
+// Jitter: true (default), JitterFactor: 0.3 (±30% randomization)
+
+for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+    delay := policy.NextDelay(attempt)
+    time.Sleep(delay)
+    // Retry...
+}
+```
+
+### State Transition Validation
+
+Enforces valid state transitions:
+
+```go
+import "ai_orchestrator/internal/statestore"
+
+// Valid: pending → running → done
+// Invalid: pending → done (must go through running)
+
+if !statestore.IsValidTransition(oldState, newState) {
+    return statestore.ErrInvalidTransition
+}
+```
+
+### Latency-Aware Load Balancing
+
+Selects workers based on capacity and latency:
+
+```go
+worker, err := registry.Next() // Selects worker with:
+// 1. Healthy (heartbeat OK)
+// 2. Active tasks < capacity
+// 3. Fewest active tasks (tie-break: lowest latency)
+```
+
+### Context Relevance Scoring
+
+Retrieves most relevant context:
+
+```go
+cm.AddMemory("deployment-result", result, 0.9) // 0.9 importance
+
+relevant := cm.RetrieveRelevant(5) // Top 5 by score
+// Score = 60% recency + 40% importance
+```
+
+### Safety Limits
+
+V5 enforces safety limits to prevent infinite loops:
+
+```go
+const (
+    MaxRetriesPerTask   = 10
+    MaxExecutionTime    = 10 * time.Minute
+    MaxTasksPerWorkflow = 100
+    MaxReplans          = 5
+)
+```
+
+---
+
 ## MCP Server Integration
 
 ### Current State: Mock Implementation
@@ -318,7 +434,7 @@ type ExecutionConfig struct {
     MaxParallelTasks    int           // Max concurrent tasks
     MaxReplans         int           // Max replan iterations
     
-    // V4-specific
+    // V5-specific
     QueueCapacity       int           // Task queue size
     RPCCallRetries     int           // RPC call retries
     RPCBackoff         time.Duration // RPC backoff delay

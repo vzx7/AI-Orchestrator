@@ -1,6 +1,6 @@
-# AI Orchestrator V4 — Руководство по развёртыванию
+# AI Orchestrator V5 — Руководство по развёртыванию
 
-Подробное руководство по развёртыванию AI Orchestrator V4 в средах разработки и продакшена.
+Подробное руководство по развёртыванию AI Orchestrator V5 в средах разработки и продакшена.
 
 ## Содержание
 
@@ -9,11 +9,12 @@
 3. [Быстрый старт](#быстрый-старт)
 4. [Локальная разработка](#локальная-разработка)
 5. [Распределённый режим](#распределённый-режим)
-6. [Интеграция MCP сервера](#интеграция-mcp-сервера)
-7. [Конфигурация](#конфигурация)
-8. [Настройка PostgreSQL](#настройка-postgresql)
-9. [Продакшен развёртывание](#продакшен-развёртывание)
-10. [Устранение проблем](#устранение-проблем)
+6. [Новые функции V5](#новые-функции-v5)
+7. [Интеграция MCP сервера](#интеграция-mcp-сервера)
+8. [Конфигурация](#конфигурация)
+9. [Настройка PostgreSQL](#настройка-postgresql)
+10. [Продакшен развёртывание](#продакшен-развёртывание)
+11. [Устранение проблем](#устранение-проблем)
 
 ---
 
@@ -56,12 +57,15 @@
 | Компонент | Пакет | Назначение |
 |-----------|-------|------------|
 | **Надёжная очередь** | `internal/queue` | Ack/Nack семантика, отслеживание in-flight |
+| **Visibility Timeout** | `internal/queue` | V5: Авто-восстановление зависших задач |
 | **Очередь мёртвых писем** | `internal/dlq` | Захват исчерпавших задачи |
 | **Магазин идемпотентности** | `internal/idempotency` | Безопасные повторы — задача = один раз |
-| **Политика повторов** | `internal/retry` | Экспоненциальная задержка |
-| **Хранилище состояний** | `internal/statestore` | Постоянное хранение состояний задач |
+| **Политика повторов** | `internal/retry` | V5: Экспоненциальная задержка + jitter |
+| **Circuit Breaker** | `internal/resilience` | V5: Изоляция сбоев |
+| **Хранилище состояний** | `internal/statestore` | V5: Валидация переходов состояний |
 | **Усиленный Worker** | `internal/worker` | Восстановление после паники, таймауты |
-| **Реестр Workers** | `internal/registry` | Проверка здоровья, наименее загруженный |
+| **Реестр Workers** | `internal/registry` | V5: Балансировка с учётом задержки |
+| **Visibility Reaper** | `internal/maintenance` | V5: Фоновый сборщик задач |
 
 ---
 
@@ -124,12 +128,11 @@ go mod download
 go run ./cmd/orchestrator/
 
 # Ожидаемый вывод:
-# INFO: AI Orchestrator V4 — Local Mode
-# INFO: User goal: Fix failing test and deploy service
+# INFO: AI Orchestrator V5 — Local Mode
 # INFO: === Execution Results ===
 # INFO: Result 1: task_id=xxx, status=SUCCESS
 # INFO: Result 2: task_id=xxx, status=SUCCESS
-# INFO: V4 Demo Complete
+# INFO: V5 Demo Complete
 ```
 
 ---
@@ -227,6 +230,118 @@ Workers отправляют heartbeat каждые 10 секунд. Если н
 
 ---
 
+## Новые функции V5
+
+### Circuit Breaker
+
+Предотвращает каскадные сбои, отклоняя вызовы к падающим workers:
+
+```go
+import "ai_orchestrator/internal/resilience"
+
+cb := resilience.NewCircuitBreaker(resilience.DefaultConfig())
+
+err := cb.Execute(func() error {
+    return worker.ExecuteTask(ctx, task)
+})
+
+if errors.Is(err, resilience.ErrCircuitOpen) {
+    // Worker недоступен, попробовать другой worker
+}
+```
+
+Состояния: `closed` → `open` (после 5 сбоев) → `half-open` (после 30с) → `closed`
+
+### Visibility Timeout Reaper
+
+Автоматически восстанавливает задачи в "processing" когда workers крашатся:
+
+```go
+import "ai_orchestrator/internal/maintenance"
+import "ai_orchestrator/internal/queue"
+
+q := queue.NewMemoryQueue(100, queue.BackpressureBlock)
+q.SetVisibilityConfig(queue.VisibilityConfig{
+    Timeout:       60 * time.Second,
+    CheckInterval: 10 * time.Second,
+})
+
+reaper := maintenance.NewVisibilityReaper(logger, q, maintenance.DefaultReaperConfig())
+ctx, cancel := context.WithCancel(context.Background())
+reaper.Start(ctx)
+
+// При завершении
+reaper.Stop()
+defer cancel()
+```
+
+### Повторы с Jitter
+
+Предотвращает "thundering herd" на повторах:
+
+```go
+policy := retry.DefaultPolicy()
+// Jitter: true (по умолчанию), JitterFactor: 0.3 (±30% рандомизация)
+
+for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+    delay := policy.NextDelay(attempt)
+    time.Sleep(delay)
+    // Повтор...
+}
+```
+
+### Валидация переходов состояний
+
+Принудительно выполняет допустимые переходы состояний:
+
+```go
+import "ai_orchestrator/internal/statestore"
+
+// Допустимые: pending → running → done
+// Недопустимые: pending → done (должен пройти через running)
+
+if !statestore.IsValidTransition(oldState, newState) {
+    return statestore.ErrInvalidTransition
+}
+```
+
+### Балансировка с учётом задержки
+
+Выбирает workers на основе ёмкости и задержки:
+
+```go
+worker, err := registry.Next() // Выбирает worker с:
+// 1. Healthy (heartbeat OK)
+// 2. Активные задачи < ёмкости
+// 3. Наименьшее количество активных задач (при равных - наименьшая задержка)
+```
+
+### Контекст с оценкой релевантности
+
+Получает наиболее релевантный контекст:
+
+```go
+cm.AddMemory("deployment-result", result, 0.9) // важность 0.9
+
+relevant := cm.RetrieveRelevant(5) // Топ-5 по оценке
+// Оценка = 60% свежесть + 40% важность
+```
+
+### Пределы безопасности
+
+V5 принудительно устанавливает пределы безопасности для предотвращения бесконечных циклов:
+
+```go
+const (
+    MaxRetriesPerTask   = 10
+    MaxExecutionTime    = 10 * time.Minute
+    MaxTasksPerWorkflow = 100
+    MaxReplans          = 5
+)
+```
+
+---
+
 ## Интеграция MCP сервера
 
 ### Текущее состояние: Mock-реализация
@@ -318,7 +433,7 @@ type ExecutionConfig struct {
     MaxParallelTasks    int           // Макс. параллельных задач
     MaxReplans         int           // Макс. итераций реплана
     
-    // V4-специфичные
+    // V5-специфичные
     QueueCapacity       int           // Размер очереди задач
     RPCCallRetries     int           // Повторы RPC-вызовов
     RPCBackoff         time.Duration // Задержка RPC

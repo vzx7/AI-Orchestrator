@@ -5,11 +5,23 @@
 // - Enhanced Result with Metadata
 // - Evaluation for feedback loop
 // - ExecutionTrace for observability
+//
+// V5 adds:
+// - Safety limits for workflows
+// - Enhanced execution config
 package types
 
 import (
 	"fmt"
 	"time"
+)
+
+// Safety limits for workflow execution.
+const (
+	MaxRetriesPerTask   = 10
+	MaxExecutionTime    = 10 * time.Minute
+	MaxTasksPerWorkflow = 100
+	MaxReplans          = 5
 )
 
 // TaskStatus represents the current state of a task in the execution lifecycle.
@@ -28,7 +40,7 @@ const (
 // Task represents a single unit of work to be executed by an agent.
 type Task struct {
 	ID             string         `json:"id"`
-	IdempotencyKey string         `json:"idempotency_key,omitempty"` // V4: idempotent execution
+	IdempotencyKey string         `json:"idempotency_key,omitempty"` // V5: idempotent execution
 	Goal           string         `json:"goal"`
 	Context        map[string]any `json:"context,omitempty"`
 	Constraints    []string       `json:"constraints,omitempty"`
@@ -67,13 +79,13 @@ type Plan struct {
 //
 // V2 enhancement: added Metadata for rich observability data.
 type Result struct {
-	TaskID   string         `json:"task_id"`
-	Success  bool           `json:"success"`
-	Output   any            `json:"output,omitempty"`
-	Error    string         `json:"error,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
-	Duration time.Duration  `json:"duration"`
-	Timestamp time.Time     `json:"timestamp"`
+	TaskID    string         `json:"task_id"`
+	Success   bool           `json:"success"`
+	Output    any            `json:"output,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	Duration  time.Duration  `json:"duration"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // Evaluation represents the result of evaluating a task execution.
@@ -93,28 +105,28 @@ type ExecutionConfig struct {
 	RetryBackoffBase time.Duration `json:"retry_backoff_base"`
 	MaxParallelTasks int           `json:"max_parallel_tasks"`
 	MaxReplans       int           `json:"max_replans"`
-	// V4 fields
+	// V5 fields
 	QueueCapacity    int           `json:"queue_capacity"`
-	RPCCallRetries int           `json:"rpc_call_retries"`
-	RPCBackoff     time.Duration `json:"rpc_backoff"`
-	TaskTimeout    time.Duration `json:"task_timeout"` // Per-task timeout on workers
+	RPCCallRetries   int           `json:"rpc_call_retries"`
+	RPCBackoff       time.Duration `json:"rpc_backoff"`
+	TaskTimeout      time.Duration `json:"task_timeout"` // Per-task timeout on workers
 	HeartbeatTimeout time.Duration `json:"heartbeat_timeout"`
 }
 
 // DefaultExecutionConfig returns production-ready defaults.
 func DefaultExecutionConfig() ExecutionConfig {
 	return ExecutionConfig{
-		DefaultTimeout:     30 * time.Second,
-		MaxRetries:         3,
-		RetryBackoffBase:   1 * time.Second,
-		MaxParallelTasks:   4,
-		MaxReplans:         3,
-		// V4 defaults
-		QueueCapacity:      100,
-		RPCCallRetries:     3,
-		RPCBackoff:         500 * time.Millisecond,
-		TaskTimeout:        60 * time.Second,
-		HeartbeatTimeout:   30 * time.Second,
+		DefaultTimeout:   30 * time.Second,
+		MaxRetries:       3,
+		RetryBackoffBase: 1 * time.Second,
+		MaxParallelTasks: 4,
+		MaxReplans:       3,
+		// V5 defaults
+		QueueCapacity:    100,
+		RPCCallRetries:   3,
+		RPCBackoff:       500 * time.Millisecond,
+		TaskTimeout:      60 * time.Second,
+		HeartbeatTimeout: 30 * time.Second,
 	}
 }
 
@@ -139,10 +151,10 @@ type StepTrace struct {
 
 // ExecutionTrace collects all step traces for a single orchestration run.
 type ExecutionTrace struct {
-	Goal        string      `json:"goal"`
-	PlanID      string      `json:"plan_id"`
-	Steps       []StepTrace `json:"steps"`
-	ReplanCount int         `json:"replan_count"`
+	Goal          string        `json:"goal"`
+	PlanID        string        `json:"plan_id"`
+	Steps         []StepTrace   `json:"steps"`
+	ReplanCount   int           `json:"replan_count"`
 	TotalDuration time.Duration `json:"total_duration"`
 }
 

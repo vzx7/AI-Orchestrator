@@ -1,6 +1,6 @@
 // Package worker implements a hardened distributed worker node.
 //
-// V4 adds:
+// V5 adds:
 // - Panic recovery (tasks never crash the worker)
 // - Per-task execution timeout
 // - Graceful shutdown (finish current tasks, stop accepting new ones)

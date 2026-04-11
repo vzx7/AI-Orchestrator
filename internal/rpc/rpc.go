@@ -1,6 +1,6 @@
 // Package rpc implements the communication layer between orchestrator and workers.
 //
-// V4 adds:
+// V5 adds:
 // - Retry with exponential backoff on transient failures
 // - Context-based timeout propagation
 // - Error classification (retryable vs fatal)

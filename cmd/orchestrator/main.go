@@ -1,6 +1,6 @@
-// Package main is the entry point for the AI Orchestrator CLI (V4).
+// Package main is the entry point for the AI Orchestrator CLI (V5).
 //
-// V4 Demo: Production-ready distributed orchestration with:
+// V5 Demo: Production-ready distributed orchestration with:
 // - Reliable queue (Ack/Nack)
 // - Idempotent execution (safe retries)
 // - Dead letter queue (failed task capture)
@@ -66,15 +66,15 @@ func main() {
 		printDistributedState(logger, o)
 	}
 
-	// V4: Demonstrate idempotency and DLQ
-	printV4ReliabilityInfo(logger, o)
+	// V5: Demonstrate idempotency and DLQ
+	printV5ReliabilityInfo(logger, o)
 
 	if err != nil {
 		logger.Error("Orchestration finished with errors", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("=== V4 Demo Complete ===")
+	logger.Info("=== V5 Demo Complete ===")
 }
 
 func setupDistributedWorkers(o *orchestrator.Orchestrator, logger *slog.Logger) {
@@ -125,7 +125,7 @@ func printBanner(logger *slog.Logger, distributed bool) {
 		mode = "Distributed Mode"
 	}
 	logger.Info("===========================================")
-	logger.Info(fmt.Sprintf("   AI Orchestrator V4 — %s", mode))
+	logger.Info(fmt.Sprintf("   AI Orchestrator V5 — %s", mode))
 	logger.Info("   Reliable + Persistent + Fault-Tolerant")
 	logger.Info("===========================================")
 }
@@ -207,9 +207,9 @@ func printDistributedState(logger *slog.Logger, o *orchestrator.Orchestrator) {
 	logger.Info("Task states", "counts", counts)
 }
 
-func printV4ReliabilityInfo(logger *slog.Logger, o *orchestrator.Orchestrator) {
+func printV5ReliabilityInfo(logger *slog.Logger, o *orchestrator.Orchestrator) {
 	fmt.Println()
-	logger.Info("=== V4 Reliability Features ===")
+	logger.Info("=== V5 Reliability Features ===")
 
 	// DLQ status
 	dlq := o.GetDeadLetterQueue()
@@ -234,7 +234,7 @@ func printV4ReliabilityInfo(logger *slog.Logger, o *orchestrator.Orchestrator) {
 	_ = q // tracker available for state inspection
 	logger.Info("Task queue", "pending", 0, "in_flight", 0)
 
-	// V4 feature summary
+	// V5 feature summary
 	logger.Info("Active features:",
 		"reliable_queue", "Ack/Nack semantics",
 		"idempotency", "Safe retries",
