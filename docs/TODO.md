@@ -69,21 +69,25 @@
 
 ---
 
-## 4. Приоритет P2 — SDK и клиенты
+## 4. Приоритет P2 — SDK и клиенты ✅ ЗАВЕРШЕНО
 
 ### P2.1: Go SDK ✅
-**TODO:**
-- [x] orchestrator-go SDK пакет
+- [x] `ai_orchestrator/sdk/go/orchestrator` пакет
 - [x] Методы: SubmitTask, GetTask, ListTasks, CancelTask
 
 ### P2.2: Python SDK ✅
-**TODO:**
-- [x] orchestrator-python пакет
-- [x] Async support
+- [x] `ai_orchestrator/sdk/python` пакет
+- [x] Async support с aiohttp
 
 ### P2.3: CLI инструмент ✅
-**TODO:**
-- [x] Команды: run, get, list, cancel
+- [x] `cmd/cli/main.go` — независимый HTTP клиент
+- [x] Команды: run, get, list, cancel, queue, dlq, health
+- [x] `cmd/cli/README.md` — документация
+
+### P2.4: SDK часть монорепо ✅
+- [x] Go SDK: `ai_orchestrator/sdk/go/orchestrator`
+- [x] Python SDK: `ai_orchestrator/sdk/python/ai_orchestrator`
+- [x] CLI: `cmd/cli/main.go` — не зависит от SDK
 
 ---
 
@@ -135,10 +139,10 @@
 |----------|------|-----------|----------|
 | **P0** | 4 | 4 | 0 |
 | **P1** | 4 | 4 | 0 |
-| **P2** | 3 | 3 | 0 |
+| **P2** | 4 | 4 | 0 |
 | **P3** | 3 | 0 | 3 |
 | **P4** | 3 | 0 | 3 |
-| **Итого** | **17** | **8** | **9** |
+| **Итого** | **18** | **11** | **7** |
 
 ---
 

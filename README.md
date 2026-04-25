@@ -22,23 +22,42 @@ A distributed multi-agent AI orchestration platform built in Go (1.26.1). V5 add
 
 ## Quick Start
 
+### 1. Clone and build
+
 ```bash
-# Clone and build
 git clone <repo>
 cd AI-Orchestrator
 go mod download
-
-# Run HTTP server (recommended for remote access)
-go run ./cmd/server/main.go -distributed
-
-# Run local mode (all-in-one, no network)
-go run ./cmd/orchestrator/
-
-# Run distributed demo (simulated workers in-process)
-go run ./cmd/orchestrator/ --distributed
+go build ./...
 ```
 
-## HTTP API Usage
+### 2. Run server
+
+```bash
+# With distributed workers (recommended)
+go run ./cmd/server/main.go -distributed
+
+# Or local mode (all-in-one)
+go run ./cmd/server/main.go
+```
+
+### 3. Use CLI
+
+```bash
+# Build CLI
+go build -o orchestrator-cli ./cmd/cli
+
+# Health check
+./orchestrator-cli health
+
+# Submit task
+./orchestrator-cli run "Analyze codebase and find todos"
+
+# List tasks
+./orchestrator-cli list
+```
+
+### 4. Or use HTTP API
 
 ```bash
 # Health check
@@ -54,9 +73,58 @@ curl http://localhost:8080/v1/tasks
 
 # Get queue status
 curl http://localhost:8080/v1/queue
+```
 
-# Get Dead Letter Queue
-curl http://localhost:8080/v1/dlq
+## Project Structure
+
+```
+AI-Orchestrator/
+├── cmd/
+│   ├── server/main.go       # HTTP API server (recommended)
+│   ├── orchestrator/main.go # Demo orchestrator (local mode)
+│   ├── cli/main.go         # CLI tool
+│   └── worker/main.go       # Standalone worker
+├── sdk/
+│   ├── go/orchestrator/    # Go SDK
+│   └── python/             # Python SDK (async)
+├── internal/              # Core components
+├── deploy/
+│   ├── docker-compose.yml  # Docker Compose
+│   ├── k8s/              # Kubernetes manifests
+│   └── Dockerfile        # Multi-stage build
+└── docs/                  # Documentation
+```
+
+## SDK Clients
+
+### Go SDK
+
+```bash
+go get ai_orchestrator/sdk/go/orchestrator
+```
+
+```go
+import "ai_orchestrator/sdk/go/orchestrator"
+
+client := orchestrator.NewClient(
+    orchestrator.WithURL("http://localhost:8080"),
+)
+health, _ := client.Health(ctx)
+```
+
+### Python SDK
+
+```bash
+pip install -e ai_orchestrator/sdk/python
+```
+
+```python
+import asyncio
+from ai_orchestrator import OrchestratorClient
+
+async def main():
+    async with OrchestratorClient(url="http://localhost:8080") as client:
+        health = await client.health()
 ```
 
 ## Documentation
@@ -67,7 +135,7 @@ curl http://localhost:8080/v1/dlq
 | 🇷🇺 Русский | [Руководство по развёртыванию](docs/DEPLOYMENT_RU.md) |
 | 🇬🇧 English | [User Guide](docs/USER_GUIDE.md) |
 | 🇷🇺 Русский | [Руководство пользователя](docs/USER_GUIDE_RU.md) |
-| 🇬🇧/🇷🇺 | [How It Works](docs/SERVICE_EXPLAINED.md) |
+| CLI | [CLI README](cmd/cli/README.md) |
 
 ## Architecture Evolution
 
@@ -77,7 +145,7 @@ curl http://localhost:8080/v1/dlq
 | V2 | Adaptive control loop (Plan→Execute→Evaluate→Replan) + DAG |
 | V3 | Distributed execution with worker nodes + RPC + queue |
 | V4 | Reliable + Persistent + Fault-Tolerant |
-| **V5** | **Circuit Breaker + Visibility Timeout + HTTP API + gRPC** |
+| **V5** | **Circuit Breaker + Visibility Timeout + HTTP API** |
 
 ## Running Tests
 
@@ -92,6 +160,9 @@ go test ./... -v
 | Component | Status | Notes |
 |-----------|--------|-------|
 | HTTP REST API | ✅ | Full API on :8080 |
+| CLI | ✅ | Standalone, built-in HTTP |
+| Go SDK | ✅ | Part of repo |
+| Python SDK | ✅ | Async aiohttp |
 | Circuit Breaker | ✅ | Wired into RPC |
 | Visibility Reaper | ✅ | Started in distributed mode |
 | Agent interface | ✅ | DevAgent, QAAgent, OpsAgent (mock) |
@@ -129,7 +200,9 @@ go test ./... -v
 - [x] Wire Circuit Breaker into RPC/execution path
 - [x] Start Visibility Reaper in main.go
 - [x] Add HTTP REST API server
-- [x] Compile gRPC proto
+- [x] Add CLI tool
+- [x] Add Go SDK
+- [x] Add Python SDK
 - [ ] Replace mock planner with real LLM API
 - [ ] Replace mock MCP tools with real network calls
 - [ ] Add Prometheus metrics
