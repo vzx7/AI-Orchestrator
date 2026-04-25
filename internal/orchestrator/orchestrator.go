@@ -98,6 +98,7 @@ func NewOrchestrator(logger *slog.Logger, config types.ExecutionConfig) *Orchest
 
 	// Initialize V5 components
 	o.queue = queue.NewMemoryQueue(config.QueueCapacity, queue.BackpressureBlock)
+	o.queue.SetVisibilityConfig(queue.DefaultVisibilityConfig())
 	o.workerReg = registry.NewMemoryRegistry()
 	o.rpcClient = rpc.NewClientDefault(logger)
 	o.taskTracker = statestore.NewMemoryStore()
@@ -249,6 +250,11 @@ func (o *Orchestrator) GetTaskTracker() *statestore.MemoryStore {
 // GetWorkerRegistry returns the worker registry.
 func (o *Orchestrator) GetWorkerRegistry() *registry.MemoryRegistry {
 	return o.workerReg
+}
+
+// GetTaskQueue returns the task queue.
+func (o *Orchestrator) GetTaskQueue() *queue.MemoryQueue {
+	return o.queue
 }
 
 // GetDeadLetterQueue returns the dead letter queue.

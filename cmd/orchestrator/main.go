@@ -23,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"ai_orchestrator/internal/maintenance"
 	"ai_orchestrator/internal/orchestrator"
 	"ai_orchestrator/internal/rpc"
 	"ai_orchestrator/internal/types"
@@ -52,6 +53,24 @@ func main() {
 		o.EnableDistributedMode()
 	}
 
+	// V5: Start Visibility Reaper for distributed mode
+	var reaperCtx context.Context
+	var reaperCancel context.CancelFunc
+	var reaper *maintenance.VisibilityReaper
+	if *distributed {
+		reaperCtx, reaperCancel = context.WithCancel(context.Background())
+		reaper = maintenance.NewVisibilityReaper(
+			logger,
+			o.GetTaskQueue(),
+			maintenance.DefaultReaperConfig(),
+		)
+		reaper.Start(reaperCtx)
+		logger.Info("Visibility reaper started",
+			"interval", maintenance.DefaultReaperConfig().Interval,
+			"timeout", maintenance.DefaultReaperConfig().Timeout,
+		)
+	}
+
 	goal := "Fix failing test and deploy service"
 	logger.Info("User goal", "goal", goal)
 	fmt.Println()
@@ -75,6 +94,13 @@ func main() {
 	}
 
 	logger.Info("=== V5 Demo Complete ===")
+
+	// V5: Stop Visibility Reaper
+	if reaper != nil {
+		reaper.Stop()
+		reaperCancel()
+		logger.Info("Visibility reaper stopped")
+	}
 }
 
 func setupDistributedWorkers(o *orchestrator.Orchestrator, logger *slog.Logger) {

@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package worker;
+package worker.v1;
 
-option go_package = "ai-orchestrator/proto/pb";
+option go_package = "ai_orchestrator/internal/rpc/proto;pb";
 
 // WorkerService provides remote task execution for the AI Orchestrator.
 service WorkerService {
@@ -16,12 +16,12 @@ service WorkerService {
 message TaskRequest {
   string task_id = 1;
   string agent = 2;
-  bytes payload = 3; // JSON-serialized Task
+  bytes payload = 3;
 }
 
 message TaskResponse {
   bool success = 1;
-  bytes result = 2; // JSON-serialized Result
+  bytes result = 2;
   string error = 3;
   string worker_id = 4;
 }

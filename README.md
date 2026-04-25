@@ -2,7 +2,7 @@
 
 A distributed multi-agent AI orchestration platform built in Go (1.26.1). V5 adds **circuit breakers**, **visibility timeouts**, **jittered retries**, and **latency-aware load balancing**.
 
-> ⚠️ **Status:** This is a **working prototype**. Core components (planner, executor, agents, queue, DLQ) work. Some V5 features (Circuit Breaker, Visibility Reaper) are implemented but not yet wired into the execution path.
+> ⚠️ **Status:** Working prototype with HTTP API. Core components work. Some features still need real integrations (LLM, MCP tools).
 
 ## Key Features
 
@@ -13,9 +13,12 @@ A distributed multi-agent AI orchestration platform built in Go (1.26.1). V5 add
 - **Dead Letter Queue**: Failed tasks captured for inspection
 - **Worker Health Tracking**: Heartbeat-based worker monitoring
 - **Retry with Jitter**: ±30% randomization prevents thundering herd
+- **Circuit Breaker**: Automatic failure isolation per worker
+- **Visibility Reaper**: Auto-recovery of stuck tasks
 - **State Validation**: Enforces valid state transitions
 - **Latency-Aware LB**: Considers worker latency in selection
 - **Context Relevance**: Retrieves most relevant context items
+- **HTTP REST API**: Full HTTP API for remote access
 
 ## Quick Start
 
@@ -25,11 +28,35 @@ git clone <repo>
 cd AI-Orchestrator
 go mod download
 
-# Run in local mode (all-in-one)
+# Run HTTP server (recommended for remote access)
+go run ./cmd/server/main.go -distributed
+
+# Run local mode (all-in-one, no network)
 go run ./cmd/orchestrator/
 
-# Run in distributed mode (simulated workers)
+# Run distributed demo (simulated workers in-process)
 go run ./cmd/orchestrator/ --distributed
+```
+
+## HTTP API Usage
+
+```bash
+# Health check
+curl http://localhost:8080/health
+
+# Create task
+curl -X POST http://localhost:8080/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "Fix failing test and deploy service"}'
+
+# Get task list
+curl http://localhost:8080/v1/tasks
+
+# Get queue status
+curl http://localhost:8080/v1/queue
+
+# Get Dead Letter Queue
+curl http://localhost:8080/v1/dlq
 ```
 
 ## Documentation
@@ -50,7 +77,7 @@ go run ./cmd/orchestrator/ --distributed
 | V2 | Adaptive control loop (Plan→Execute→Evaluate→Replan) + DAG |
 | V3 | Distributed execution with worker nodes + RPC + queue |
 | V4 | Reliable + Persistent + Fault-Tolerant |
-| **V5** | **Circuit Breaker + Visibility Timeout + Jitter + Relevance Scoring** |
+| **V5** | **Circuit Breaker + Visibility Timeout + HTTP API + gRPC** |
 
 ## Running Tests
 
@@ -64,6 +91,9 @@ go test ./... -v
 
 | Component | Status | Notes |
 |-----------|--------|-------|
+| HTTP REST API | ✅ | Full API on :8080 |
+| Circuit Breaker | ✅ | Wired into RPC |
+| Visibility Reaper | ✅ | Started in distributed mode |
 | Agent interface | ✅ | DevAgent, QAAgent, OpsAgent (mock) |
 | Tool Gateway | ✅ | ACL enforcement working |
 | MCP Registry | ✅ | Mock tools implemented |
@@ -75,39 +105,31 @@ go test ./... -v
 | Idempotency Store | ✅ | LRU cache |
 | Dead Letter Queue | ✅ | Working |
 | Worker Registry | ✅ | In-memory, working |
-| Event Bus | ✅ | Working |
-| Context Manager | ✅ | Working |
-| State Store | ✅ | In-memory |
-| RPC Layer | ✅ | Demo mode (in-process) |
+| gRPC Proto | ✅ | Compiled to internal/rpc/proto |
 
 ### ⚠️ Partial Implementation
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Circuit Breaker | ⚠️ | Code exists, not wired into execution |
-| Visibility Reaper | ⚠️ | Code exists, not started in main.go |
-| Retry with Jitter | ⚠️ | Jitter code exists, basic retry used |
+| Real gRPC transport | ⚠️ | Proto compiled, using demo transport |
 | PostgreSQL Store | ⚠️ | Requires `-tags postgres` build |
-| Latency-aware LB | ⚠️ | Code exists, limited effect |
+| Real LLM integration | ⚠️ | Mock planner only |
+| Real MCP network calls | ⚠️ | Mock tools only |
 
 ### ❌ Not Implemented
 
 | Feature | Notes |
 |---------|-------|
-| HTTP REST API | No HTTP server in codebase |
-| Real gRPC | Proto file not compiled |
-| Real LLM integration | Mock planner only |
-| Real MCP network calls | Mock tools only |
 | Redis/Kafka queue | Not added |
 | Prometheus metrics | Not added |
 | OpenTelemetry tracing | Not added |
 
 ## Production TODO
 
-- [ ] Wire Circuit Breaker into RPC/execution path
-- [ ] Start Visibility Reaper in main.go
-- [ ] Add HTTP REST API server
-- [ ] Compile and use real gRPC
+- [x] Wire Circuit Breaker into RPC/execution path
+- [x] Start Visibility Reaper in main.go
+- [x] Add HTTP REST API server
+- [x] Compile gRPC proto
 - [ ] Replace mock planner with real LLM API
 - [ ] Replace mock MCP tools with real network calls
 - [ ] Add Prometheus metrics

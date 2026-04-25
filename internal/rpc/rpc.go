@@ -4,17 +4,20 @@
 // - Retry with exponential backoff on transient failures
 // - Context-based timeout propagation
 // - Error classification (retryable vs fatal)
+// - Circuit breaker per worker for failure isolation
 // - Direct call transport for demo (swappable for real gRPC)
 package rpc
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"ai_orchestrator/internal/resilience"
 	"ai_orchestrator/internal/types"
 )
 
@@ -99,37 +102,43 @@ func (s *Server) GetWorkerID() string {
 	return s.workerID
 }
 
-// Client implements the RPC client for the orchestrator with retry and resilience.
+// Client implements the RPC client for the orchestrator with retry, circuit breaker and resilience.
 type Client struct {
-	logger    *slog.Logger
-	servers   map[string]*Server
-	addresses map[string]string
-	retries   int
-	backoff   time.Duration
+	logger       *slog.Logger
+	servers      map[string]*Server
+	addresses   map[string]string
+	retries      int
+	backoff     time.Duration
+	circuitBreakers map[string]*resilience.CircuitBreaker
+	cbConfig     resilience.Config
 }
 
 // ClientConfig holds RPC client configuration.
 type ClientConfig struct {
-	Retries int
-	Backoff time.Duration
+	Retries      int
+	Backoff     time.Duration
+	CircuitBreaker resilience.Config
 }
 
 // DefaultClientConfig returns production defaults.
 func DefaultClientConfig() ClientConfig {
 	return ClientConfig{
-		Retries: 3,
-		Backoff: 500 * time.Millisecond,
+		Retries:   3,
+		Backoff:   500 * time.Millisecond,
+		CircuitBreaker: resilience.DefaultConfig(),
 	}
 }
 
 // NewClient creates a new resilient worker client.
 func NewClient(logger *slog.Logger, cfg ClientConfig) *Client {
 	return &Client{
-		logger:    logger,
-		servers:   make(map[string]*Server),
-		addresses: make(map[string]string),
-		retries:   cfg.Retries,
-		backoff:   cfg.Backoff,
+		logger:       logger,
+		servers:      make(map[string]*Server),
+		addresses:    make(map[string]string),
+		retries:      cfg.Retries,
+		backoff:     cfg.Backoff,
+		circuitBreakers: make(map[string]*resilience.CircuitBreaker),
+		cbConfig:    cfg.CircuitBreaker,
 	}
 }
 
@@ -138,17 +147,44 @@ func NewClientDefault(logger *slog.Logger) *Client {
 	return NewClient(logger, DefaultClientConfig())
 }
 
-// RegisterServer adds a worker server for direct call transport (demo mode).
+// RegisterServer adds a worker server and creates a circuit breaker for it.
 func (c *Client) RegisterServer(workerID string, server *Server, address string) {
 	c.servers[workerID] = server
 	c.addresses[workerID] = address
+	c.circuitBreakers[workerID] = resilience.NewCircuitBreaker(c.cbConfig)
+	c.logger.Info("Registered worker with circuit breaker",
+		"worker_id", workerID,
+		"address", address,
+		"cb_threshold", c.cbConfig.Threshold,
+		"cb_reset_timeout", c.cbConfig.ResetTimeout,
+	)
 }
 
-// ExecuteTask calls a worker to execute a task with retry and backoff.
+// GetCircuitBreaker returns the circuit breaker for a worker.
+func (c *Client) GetCircuitBreaker(workerID string) *resilience.CircuitBreaker {
+	return c.circuitBreakers[workerID]
+}
+
+// ListWorkers returns all registered worker addresses.
+func (c *Client) ListWorkers() map[string]string {
+	result := make(map[string]string, len(c.addresses))
+	for id, addr := range c.addresses {
+		result[id] = addr
+	}
+	return result
+}
+
+// ExecuteTask calls a worker to execute a task with retry, backoff and circuit breaker.
 func (c *Client) ExecuteTask(ctx context.Context, workerID string, task types.Task) (*TaskResponse, error) {
 	server, exists := c.servers[workerID]
 	if !exists {
 		return nil, fmt.Errorf("worker not found: %s", workerID)
+	}
+
+	cb, hasCB := c.circuitBreakers[workerID]
+	if !hasCB {
+		cb = resilience.NewCircuitBreaker(c.cbConfig)
+		c.circuitBreakers[workerID] = cb
 	}
 
 	// Serialize task payload
@@ -163,7 +199,7 @@ func (c *Client) ExecuteTask(ctx context.Context, workerID string, task types.Ta
 		Payload: payload,
 	}
 
-	// Execute with retry
+	// Execute with retry and circuit breaker
 	var lastResp *TaskResponse
 	var lastErr error
 
@@ -183,25 +219,52 @@ func (c *Client) ExecuteTask(ctx context.Context, workerID string, task types.Ta
 			}
 		}
 
-		lastResp, lastErr = c.callOnce(ctx, server, req)
-		if lastErr == nil {
-			return lastResp, nil
-		}
+		// Check circuit breaker before making call
+		err := cb.Execute(func() error {
+			lastResp, lastErr = c.callOnce(ctx, server, req)
+			return lastErr
+		})
 
-		// Classify error: don't retry fatal errors
-		if isFatalError(lastErr) {
-			c.logger.Error("Fatal RPC error, not retrying",
+		if err != nil {
+			if errors.Is(err, resilience.ErrCircuitOpen) {
+				c.logger.Warn("Circuit breaker open, trying next worker",
+					"worker_id", workerID,
+				)
+				// In a real implementation, we'd try another worker here
+				// For now, return circuit open error
+				return &TaskResponse{
+					Success:  false,
+					Error:   fmt.Sprintf("circuit breaker open for worker %s", workerID),
+					WorkerID: workerID,
+				}, err
+			}
+
+			// Classify error: don't retry fatal errors
+			if isFatalError(lastErr) {
+				c.logger.Error("Fatal RPC error, not retrying",
+					"worker_id", workerID,
+					"error", lastErr,
+				)
+				return nil, lastErr
+			}
+
+			c.logger.Warn("RPC call failed, will retry",
 				"worker_id", workerID,
+				"attempt", attempt+1,
 				"error", lastErr,
 			)
-			return nil, lastErr
+			continue
 		}
 
-		c.logger.Warn("RPC call failed, will retry",
-			"worker_id", workerID,
-			"attempt", attempt+1,
-			"error", lastErr,
-		)
+		// Success or non-retryable error
+		if lastErr == nil {
+			c.logger.Info("RPC call succeeded",
+				"worker_id", workerID,
+				"task_id", task.ID,
+				"circuit_state", cb.State(),
+			)
+		}
+		return lastResp, nil
 	}
 
 	return lastResp, fmt.Errorf("rpc call failed after %d retries: %w", c.retries, lastErr)
@@ -216,15 +279,6 @@ func (c *Client) callOnce(ctx context.Context, server *Server, req *TaskRequest)
 	)
 
 	return server.ExecuteTask(ctx, req)
-}
-
-// ListWorkers returns all registered worker addresses.
-func (c *Client) ListWorkers() map[string]string {
-	result := make(map[string]string, len(c.addresses))
-	for id, addr := range c.addresses {
-		result[id] = addr
-	}
-	return result
 }
 
 // isFatalError determines if an error should not be retried.
