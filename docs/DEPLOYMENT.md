@@ -2,6 +2,8 @@
 
 A comprehensive guide to deploying AI Orchestrator V5 in development and production environments.
 
+> **Status:** Working prototype. Core components work. HTTP API and real gRPC not implemented. Circuit Breaker and Visibility Reaper exist in code but not wired into execution path.
+
 ## Table of Contents
 
 1. [System Overview](#system-overview)

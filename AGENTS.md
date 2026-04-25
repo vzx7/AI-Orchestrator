@@ -4,11 +4,13 @@ This file provides guidance for agentic coding agents working in this repository
 
 ## Project Overview
 
-AI Orchestrator V5 is a production-ready, distributed multi-agent AI orchestration platform built in Go (1.26.1). It implements fault-tolerant distributed task execution with gRPC communication.
+AI Orchestrator V5 is a distributed multi-agent AI orchestration platform built in Go (1.26.1). It implements fault-tolerant distributed task execution.
+
+> ⚠️ **Status:** Working prototype. Core components work. HTTP API and real gRPC not implemented. Some V5 features (Circuit Breaker, Visibility Reaper) exist in code but not wired into execution.
 
 V5 adds:
-- Circuit breaker for failure isolation
-- Visibility timeout reaper for stuck task recovery
+- Circuit breaker for failure isolation (code exists, not wired)
+- Visibility timeout reaper for stuck task recovery (code exists, not started)
 - Advanced retry with jitter
 - State transition validation
 - Latency-aware load balancing
