@@ -36,6 +36,7 @@ install:
 build:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/orchestrator ./cmd/server
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/worker ./cmd/worker
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/orchestrator-cli ./cmd/cli
 
 # ============================================
 # Test / Lint
@@ -63,6 +64,21 @@ run-local-distributed:
 
 run-server:
 	go run ./cmd/server/main.go -distributed
+
+# ============================================
+# CLI
+# ============================================
+cli-health:
+	go run ./cmd/cli/main.go health -addr=http://localhost:8080
+
+cli-run:
+	go run ./cmd/cli/main.go run "$(GOAL)" -addr=http://localhost:8080
+
+cli-list:
+	go run ./cmd/cli/main.go list -addr=http://localhost:8080
+
+cli-queue:
+	go run ./cmd/cli/main.go queue -addr=http://localhost:8080
 
 # ============================================
 # Docker
