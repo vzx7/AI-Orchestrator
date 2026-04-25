@@ -1,0 +1,121 @@
+.PHONY: help build up down logs clean ps
+
+# ============================================
+# Variables
+# ============================================
+REGISTRY ?= ghcr.io
+IMAGE_PREFIX ?= your-org
+VERSION ?= latest
+
+# ============================================
+# Help
+# ============================================
+help:
+	@echo "AI Orchestrator Deployment"
+	@echo ""
+	@echo "Usage:"
+	@echo "  make build          - Build Docker images"
+	@echo "  make up             - Start all services"
+	@echo "  make down           - Stop all services"
+	@echo "  make logs           - View logs"
+	@echo "  make ps             - Show running containers"
+	@echo "  make clean          - Remove volumes"
+	@echo "  make health         - Check health"
+	@echo ""
+	@echo "Configuration:"
+	@echo "  REGISTRY=$(REGISTRY)"
+	@echo "  IMAGE_PREFIX=$(IMAGE_PREFIX)"
+	@echo "  VERSION=$(VERSION)"
+
+# ============================================
+# Build
+# ============================================
+build:
+	docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		-t $(REGISTRY)/$(IMAGE_PREFIX)/orchestrator:$(VERSION) \
+		-t $(REGISTRY)/$(IMAGE_PREFIX)/orchestrator:latest \
+		-f deploy/Dockerfile \
+		--target orchestrator \
+		.
+
+	docker buildx build \
+		--platform linux/amd64,linux/arm64 \
+		-t $(REGISTRY)/$(IMAGE_PREFIX)/orchestrator-worker:$(VERSION) \
+		-t $(REGISTRY)/$(IMAGE_PREFIX)/orchestrator-worker:latest \
+		-f deploy/Dockerfile \
+		--target worker \
+		.
+
+# ============================================
+# Up / Down
+# ============================================
+up:
+	docker compose -f deploy/docker-compose.yml up -d
+	@echo "Waiting for services to be healthy..."
+	@sleep 10
+	@$(MAKE) health
+
+down:
+	docker compose -f deploy/docker-compose.yml down
+
+# ============================================
+# Logs
+# ============================================
+logs:
+	docker compose -f deploy/docker-compose.yml logs -f
+
+logs-orchestrator:
+	docker compose -f deploy/docker-compose.yml logs -f orchestrator
+
+logs-worker:
+	docker compose -f deploy/docker-compose.yml logs -f worker-1 worker-2
+
+# ============================================
+# Status
+# ============================================
+ps:
+	docker compose -f deploy/docker-compose.yml ps
+
+health:
+	@echo "=== Health Checks ==="
+	@curl -s http://localhost:8080/health | jq . 2>/dev/null || echo "Orchestrator: not ready"
+	@docker exec -i deploy-redis-1 redis-cli ping 2>/dev/null || echo "Redis: not ready"
+	@docker exec -i deploy-postgres-1 pg_isready -U admin -d orchestrator 2>/dev/null || echo "PostgreSQL: not ready"
+
+# ============================================
+# Clean
+# ============================================
+clean:
+	docker compose -f deploy/docker-compose.yml down -v
+	docker system prune -f
+
+# ============================================
+# Development
+# ============================================
+dev:
+	docker compose -f deploy/docker-compose.yml up worker-1 worker-2
+	@echo "Run './cmd/server/main.go -distributed' locally to connect"
+
+# ============================================
+# Monitoring
+# ============================================
+monitoring:
+	docker compose -f deploy/docker-compose.yml --profile monitoring up -d prometheus grafana
+	@echo "Prometheus: http://localhost:9090"
+	@echo "Grafana: http://localhost:3000"
+
+stop-monitoring:
+	docker compose -f deploy/docker-compose.yml --profile monitoring down
+
+# ============================================
+# Database
+# ============================================
+db-console:
+	docker exec -it deploy-postgres-1 psql -U admin -d orchestrator
+
+db-backup:
+	docker exec deploy-postgres-1 pg_dump -U admin orchestrator > backup_$$(date +%Y%m%d_%H%M%S).sql
+
+db-restore:
+	docker exec -i deploy-postgres-1 psql -U admin orchestrator < backup_file.sql

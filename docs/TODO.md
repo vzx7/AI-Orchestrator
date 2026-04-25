@@ -39,29 +39,43 @@
 
 ---
 
-## 3. Приоритет P1 — Cloud Deployment
+## 3. Приоритет P1 — Cloud Deployment ✅ ЗАВЕРШЕНО
 
 Деплой в облако.
 
 ### P1.1: Docker Compose для production
 
-**TODO:**
-- [ ] Создать docker-compose.yml для production
-- [ ] Настроить environment variables
-- [ ] Добавить health checks
-- [ ] Конфигурация volumes
+**Выполнено:**
+- [x] docker-compose.yml для production
+- [x] Environment variables (deploy/.env.example)
+- [x] Health checks
+- [x] Volumes
+- [x] Dockerfile с multi-stage builds
 
 ### P1.2: Kubernetes manifests
 
-**TODO:**
-- [ ] Deployment для orchestrator
-- [ ] Deployment для workers
-- [ ] Service с LoadBalancer
-- [ ] ConfigMap / Secret
+**Выполнено:**
+- [x] Namespace, ConfigMap, Secrets
+- [x] PostgreSQL Deployment + Service
+- [x] Redis Deployment + Service
+- [x] Orchestrator Deployment + LoadBalancer
+- [x] Workers Deployment
+- [x] HPA (HorizontalPodAutoscaler)
+- [x] PVC для persistent storage
+- [x] Kustomization.yaml
 
 ### P1.3: CI/CD pipeline
 
-**TODO:**
+**Выполнено:**
+- [x] GitHub Actions workflow (.github/workflows/ci-cd.yml)
+- [x] Makefile для разработки
+- [x] Test, Lint, Build, Deploy stages
+
+### P1.4: PostgreSQL интеграция
+
+**Выполнено:**
+- [x] init.sql схема
+- [x] Docker volumes
 - [ ] GitHub Actions workflow: Lint → Test → Build → Push
 - [ ] Docker build с Multi-arch (amd64, arm64)
 

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: ai-orchestrator
+  labels:
+    app.kubernetes.io/name: ai-orchestrator
+data:
+  LOG_LEVEL: "info"
+  MODE: "distributed"
+  PORT: "8080"
+  API_ENDPOINT: "/v1/tasks"
+  HEALTH_ENDPOINT: "/health"
+  QUEUE_ENDPOINT: "/v1/queue"
+  DLQ_ENDPOINT: "/v1/dlq"

@@ -1,0 +1,165 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # Orchestrator - Main API Server
+  # ============================================
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: orchestrator
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_PREFIX:-your-org}/orchestrator:${VERSION:-latest}
+    ports:
+      - "8080:8080"
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - MODE=distributed
+      - API_KEY=${API_KEY:-change-me-in-production}
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - orchestrator_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - orchestrator_net
+
+  # ============================================
+  # Worker 1 - Task Executor
+  # ============================================
+  worker-1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: worker
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_PREFIX:-your-org}/orchestrator-worker:${VERSION:-latest}
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - WORKER_ID=worker-1
+      - ORCHESTRATOR_URL=http://orchestrator:8080
+    env_file:
+      - .env
+    depends_on:
+      - orchestrator
+    restart: unless-stopped
+    networks:
+      - orchestrator_net
+
+  # ============================================
+  # Worker 2 - Task Executor  
+  # ============================================
+  worker-2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: worker
+    image: ${REGISTRY:-ghcr.io}/${IMAGE_PREFIX:-your-org}/orchestrator-worker:${VERSION:-latest}
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - WORKER_ID=worker-2
+      - ORCHESTRATOR_URL=http://orchestrator:8080
+    env_file:
+      - .env
+    depends_on:
+      - orchestrator
+    restart: unless-stopped
+    networks:
+      - orchestrator_net
+
+  # ============================================
+  # PostgreSQL - Persistent State
+  # ============================================
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-orchestrator}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestrator_net
+
+  # ============================================
+  # Redis - Task Queue / Cache
+  # ============================================
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - orchestrator_net
+
+  # ============================================
+  # Prometheus - Monitoring (optional)
+  # ============================================
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    networks:
+      - orchestrator_net
+
+  # ============================================
+  # Grafana - Dashboards (optional)
+  # ============================================
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    profiles:
+      - monitoring
+    networks:
+      - orchestrator_net
+
+networks:
+  orchestrator_net:
+    driver: bridge
+
+volumes:
+  orchestrator_data:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

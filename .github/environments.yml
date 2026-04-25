@@ -1,0 +1,8 @@
+# Container environments for deployment
+environments:
+  development:
+    url: https://dev.orchestrator.example.com
+  staging:
+    url: https://staging.orchestrator.example.com
+  production:
+    url: https://orchestrator.example.com
